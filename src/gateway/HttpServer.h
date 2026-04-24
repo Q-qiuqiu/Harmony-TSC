@@ -9,6 +9,7 @@
 const std::string QUSET_ROUTE = "/quest";
 const std::string REGISTER_NODE_ROUTE = "/register_node";
 const std::string HOTSTART_ROUTE = "/hot_start";
+const std::string CLUSTER_RESOURCES_ROUTE = "/cluster/resources";
 
 class HttpServer {
 public:
@@ -19,6 +20,7 @@ private:
     static void HandleQuest(const httplib::Request &req, httplib::Response &res);
     static void HandleRegisterNode(const httplib::Request &req, httplib::Response &res);
     static void HandleHotStart(const httplib::Request &req, httplib::Response &res);
+    static void HandleClusterResources(const httplib::Request &req, httplib::Response &res);
 
     std::string ip;
     int port;

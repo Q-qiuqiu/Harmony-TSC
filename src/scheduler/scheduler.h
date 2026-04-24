@@ -102,6 +102,7 @@ public:
     static void loadStaticInfo(std::string filepath);
     // get static_info
     static std::map<TaskType, std::map<DeviceType, StaticInfoItem>> getStaticInfo() ;
+    static json getClusterResources();
 
     static ImageInfo getImage(TaskType taskType, DeviceType devType);
 

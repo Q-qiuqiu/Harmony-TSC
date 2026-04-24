@@ -22,6 +22,7 @@ bool HttpServer::Start() {
     svr.Post(QUSET_ROUTE, this->HandleQuest);
     svr.Post(REGISTER_NODE_ROUTE, this->HandleRegisterNode);
     svr.Post("/hot_start", this->HandleHotStart);
+    svr.Get(CLUSTER_RESOURCES_ROUTE, this->HandleClusterResources);
     spdlog::info("HttpServer started success，ip:{} port:{}",this->ip, this->port);
     auto result = svr.listen(this->ip, this->port);
     if (!result) {
@@ -185,3 +186,13 @@ void HttpServer::HandleHotStart(const httplib::Request &req, httplib::Response &
     }
 }
 
+void HttpServer::HandleClusterResources(const httplib::Request &req, httplib::Response &res) {
+    (void) req;
+    spdlog::info("Fetching cluster resources...");
+    json response;
+    response["status"] = "success";
+    response["result"] = Docker_scheduler::getClusterResources();
+
+    res.status = 200;
+    res.set_content(response.dump(), "application/json");
+}
