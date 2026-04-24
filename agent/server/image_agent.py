@@ -15,8 +15,7 @@ app = Flask(__name__)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 TOOLS_DIR = os.path.normpath(os.path.join(BASE_DIR, "..", "tools"))
-DEFAULT_MCP_SERVER_PATH = os.path.join(TOOLS_DIR, "cluster_resources_mcp.py")
-DEFAULT_MCP_TOOL_NAME = "get_cluster_resources"
+DEFAULT_MCP_SERVER_PATH = os.path.join(TOOLS_DIR, "mcp_server.py")
 
 lock = threading.Lock()
 is_blocking = False
@@ -65,10 +64,7 @@ def call_llm(messages):
     }
 
 
-def call_mcp_tool(server_path, tool_name, arguments=None, timeout=30):
-    if arguments is None:
-        arguments = {}
-
+def call_mcp_server(server_path, requests, timeout=30):
     process = subprocess.Popen(
         [sys.executable, server_path],
         stdin=subprocess.PIPE,
@@ -76,12 +72,6 @@ def call_mcp_tool(server_path, tool_name, arguments=None, timeout=30):
         stderr=subprocess.PIPE,
         text=True,
     )
-
-    requests = [
-        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
-        {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
-        {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool_name, "arguments": arguments}},
-    ]
     request_payload = "".join(json.dumps(item, ensure_ascii=False) + "\n" for item in requests)
 
     try:
@@ -99,6 +89,38 @@ def call_mcp_tool(server_path, tool_name, arguments=None, timeout=30):
         line = line.strip()
         if line:
             responses.append(json.loads(line))
+    return responses
+
+
+def list_mcp_tools(server_path, timeout=30):
+    responses = call_mcp_server(
+        server_path,
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+        ],
+        timeout=timeout,
+    )
+    for item in responses:
+        if item.get("id") == 2:
+            return item.get("result", {}).get("tools", [])
+    raise RuntimeError("MCP server did not return tools/list response")
+
+
+def call_mcp_tool(server_path, tool_name, arguments=None, timeout=30):
+    if arguments is None:
+        arguments = {}
+
+    responses = call_mcp_server(
+        server_path,
+        [
+            {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}},
+            {"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool_name, "arguments": arguments}},
+        ],
+        timeout=timeout,
+    )
 
     for item in responses:
         if item.get("id") != 2:
@@ -122,6 +144,12 @@ def execute_tool(tool_name, arguments=None):
     if not os.path.exists(DEFAULT_MCP_SERVER_PATH):
         raise RuntimeError(f"MCP server not found: {DEFAULT_MCP_SERVER_PATH}")
     return call_mcp_tool(DEFAULT_MCP_SERVER_PATH, tool_name, arguments=arguments or {})
+
+
+def discover_tools():
+    if not os.path.exists(DEFAULT_MCP_SERVER_PATH):
+        raise RuntimeError(f"MCP server not found: {DEFAULT_MCP_SERVER_PATH}")
+    return list_mcp_tools(DEFAULT_MCP_SERVER_PATH)
 
 
 def parse_json_object(text):
@@ -191,81 +219,110 @@ def save_uploaded_image(uploaded_file):
     return temp_file.name
 
 
-def select_node_for_image_request(user_text, cluster_resources):
-    messages = [
+def build_agent_messages(user_text, image_path, tools):
+    tool_list_json = json.dumps(tools, ensure_ascii=False)
+    return [
         {
             "role": "system",
             "content": (
-                "You are selecting a board for an edge vision task.\n"
-                "Use only the user text and the provided cluster resources.\n"
-                "Return JSON only with this schema:\n"
-                "{\"task_type\":\"YoloV5\",\"target_global_id\":\"<uuid>\",\"real_url\":\"predict\",\"reason\":\"<short reason>\"}\n"
+                "You are an image task orchestration agent.\n"
+                "You must decide which tools to call, in what order, and with what arguments.\n"
+                "The uploaded image is already saved locally and tools can use the local image path.\n"
+                "Use tools to inspect cluster resources, available task catalog, and execute the image task.\n"
+                "Before calling the execution tool, you must first call get_cluster_resources.\n"
+                "If model choice matters, call get_task_catalog before the execution tool.\n"
+                "When calling get_task_catalog, pass available_device_types derived from the node types returned by get_cluster_resources so the context only contains models that match currently available platforms.\n"
+                "For execution, prefer lower resource overhead models when they can satisfy the request.\n"
+                "For generic multi-object detection requests, YoloV5 is often suitable; for lightweight classification-style requests, MobileNet or ResNet50 may be more appropriate.\n"
+                "Available tools:\n"
+                f"{tool_list_json}\n"
                 "Rules:\n"
-                "1. Prefer YoloV5 for generic image detection requests.\n"
-                "2. target_global_id must be one of the provided nodes.\n"
-                "3. real_url should usually be predict."
+                "1. If you want to call a tool, reply with JSON only:\n"
+                "{\"action\":\"tool_call\",\"tool_name\":\"<tool name>\",\"arguments\":{}}\n"
+                "2. Tool arguments must match the tool schema.\n"
+                "3. Never call run_vision_task_on_node until you already know a real target_global_id from tool output.\n"
+                "4. target_global_id must come from get_cluster_resources result and must never be a placeholder such as default, unknown, null, or empty string.\n"
+                "5. When calling run_vision_task_on_node, include the provided image_path exactly as given.\n"
+                "6. After receiving tool results, continue reasoning and either call another tool or produce the final answer.\n"
+                "7. If required information is missing, call another tool instead of guessing.\n"
+                "8. Do not invent node ids, task types, device types, or tool results.\n"
+                "9. When you have enough information, reply with JSON only:\n"
+                "{\"action\":\"final\",\"content\":\"<natural language chinese answer>\"}\n"
+                "10. Never output anything except a single JSON object."
             ),
         },
         {
             "role": "user",
             "content": (
                 f"user_text:\n{user_text}\n\n"
-                f"cluster_resources:\n{json.dumps(cluster_resources, ensure_ascii=False)}"
+                f"image_path:\n{image_path}"
             ),
         },
     ]
-    model_result = call_llm(messages)
-    selection = parse_json_object(model_result["content"])
-    for key in ["task_type", "target_global_id", "real_url"]:
-        if not selection.get(key):
-            raise RuntimeError(f"model selection result missing required field: {key}")
-
-    available_ids = {
-        node.get("global_id")
-        for node in cluster_resources.get("result", [])
-        if isinstance(node, dict) and node.get("global_id")
-    }
-    if selection["target_global_id"] not in available_ids:
-        raise RuntimeError("model selected a target_global_id that is not in cluster resources")
-
-    selection["_usage"] = {
-        "prompt_tokens": model_result["prompt_tokens"],
-        "completion_tokens": model_result["completion_tokens"],
-    }
-    return selection
 
 
-def summarize_image_result(user_text, selection, tool_result):
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are an assistant explaining an image recognition result in Chinese.\n"
-                "Use only the user text and the tool result.\n"
-                "Reply in natural language.\n"
-                "Do not output JSON."
-            ),
-        },
-        {
-            "role": "user",
-            "content": (
-                f"user_text:\n{user_text}\n\n"
-                f"selection:\n{json.dumps(selection, ensure_ascii=False)}\n\n"
-                f"tool_result:\n{json.dumps(tool_result, ensure_ascii=False)}"
-            ),
-        },
-    ]
-    model_result = call_llm(messages)
-    answer = model_result["content"].strip()
-    if not answer:
-        raise RuntimeError("model summary result is empty")
-    return {
-        "answer": answer,
-        "_usage": {
-            "prompt_tokens": model_result["prompt_tokens"],
-            "completion_tokens": model_result["completion_tokens"],
-        },
-    }
+def run_image_agent(user_text, image_path, max_steps=6):
+    working_messages = build_agent_messages(user_text, image_path, discover_tools())
+    total_prompt_tokens = 0
+    total_completion_tokens = 0
+    selected_execution = None
+    last_tool_result = None
+
+    for _ in range(max_steps):
+        model_result = call_llm(working_messages)
+        total_prompt_tokens += model_result["prompt_tokens"]
+        total_completion_tokens += model_result["completion_tokens"]
+
+        try:
+            agent_action = parse_json_object(model_result["content"])
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"model did not return valid JSON for agent control: {exc}")
+
+        action = agent_action.get("action")
+        if action == "final":
+            content = agent_action.get("content", "").strip()
+            if not content:
+                raise RuntimeError("model returned empty final content")
+            return {
+                "message": content,
+                "selected_node": selected_execution,
+                "tool_result": last_tool_result,
+                "usage": {
+                    "prompt_tokens": total_prompt_tokens,
+                    "completion_tokens": total_completion_tokens,
+                    "total_tokens": total_prompt_tokens + total_completion_tokens,
+                },
+            }
+
+        if action != "tool_call":
+            raise RuntimeError(f"unknown agent action: {action}")
+
+        tool_name = agent_action.get("tool_name")
+        tool_arguments = agent_action.get("arguments", {})
+        if not tool_name:
+            raise RuntimeError("model tool_call is missing tool_name")
+
+        tool_result_text = execute_tool(tool_name, tool_arguments)
+        try:
+            tool_result_value = json.loads(tool_result_text)
+        except json.JSONDecodeError:
+            tool_result_value = tool_result_text
+
+        if tool_name == "run_vision_task_on_node":
+            selected_execution = {
+                "task_type": tool_arguments.get("task_type"),
+                "target_global_id": tool_arguments.get("target_global_id"),
+                "real_url": tool_arguments.get("real_url", "predict"),
+            }
+            last_tool_result = tool_result_value
+
+        working_messages.append({"role": "assistant", "content": model_result["content"]})
+        working_messages.append({
+            "role": "tool",
+            "content": f"tool_name={tool_name}\nresult={json.dumps(tool_result_value, ensure_ascii=False)}"
+        })
+
+    raise RuntimeError("image agent exceeded max tool-calling steps without producing a final answer")
 
 
 @app.route("/v1/chat/cluster", methods=["POST"])
@@ -312,38 +369,14 @@ def chat_cluster():
         is_blocking = True
         temp_image_path = save_uploaded_image(image_file)
 
-        cluster_resources = json.loads(execute_tool(DEFAULT_MCP_TOOL_NAME))
-        selection = select_node_for_image_request(user_text, cluster_resources)
-        tool_result = json.loads(execute_tool(
-            "run_vision_task_on_node",
-            {
-                "task_type": selection["task_type"],
-                "target_global_id": selection["target_global_id"],
-                "image_path": temp_image_path,
-                "real_url": selection.get("real_url", "predict"),
-                "file_field_name": "image",
-            }
-        ))
-        summary = summarize_image_result(user_text, selection, tool_result)
-
-        total_prompt_tokens = selection["_usage"]["prompt_tokens"] + summary["_usage"]["prompt_tokens"]
-        total_completion_tokens = selection["_usage"]["completion_tokens"] + summary["_usage"]["completion_tokens"]
+        agent_result = run_image_agent(user_text, temp_image_path)
 
         return Response(json.dumps({
             "object": "chat.cluster",
-            "message": summary["answer"],
-            "selected_node": {
-                "task_type": selection["task_type"],
-                "target_global_id": selection["target_global_id"],
-                "real_url": selection.get("real_url", "predict"),
-                "reason": selection.get("reason", ""),
-            },
-            "tool_result": tool_result,
-            "usage": {
-                "prompt_tokens": total_prompt_tokens,
-                "completion_tokens": total_completion_tokens,
-                "total_tokens": total_prompt_tokens + total_completion_tokens,
-            }
+            "message": agent_result["message"],
+            "selected_node": agent_result["selected_node"],
+            "tool_result": agent_result["tool_result"],
+            "usage": agent_result["usage"],
         }, ensure_ascii=False), content_type="application/json")
     except Exception as exc:
         return jsonify({
