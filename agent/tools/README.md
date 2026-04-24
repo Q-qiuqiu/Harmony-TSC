@@ -5,16 +5,24 @@
 Minimal MCP server over `stdio` that exposes one tool:
 
 - `get_cluster_resources`
+- `run_vision_task_on_node`
 
 The tool reads cluster state from the gateway HTTP API:
 
 - default URL: `http://127.0.0.1:6666/cluster/resources`
+- execution URL: `http://127.0.0.1:6666/quest_on_node`
+
+The default execution settings for `run_vision_task_on_node` are:
+
+- `real_url=predict`
+- `file_field_name=image`
 
 Optional environment variables:
 
 - `GATEWAY_HOST`
 - `GATEWAY_PORT`
 - `GATEWAY_CLUSTER_RESOURCES_PATH`
+- `GATEWAY_QUEST_ON_NODE_PATH`
 
 Run manually:
 

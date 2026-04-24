@@ -13,6 +13,85 @@
 
 using json = nlohmann::json;
 
+namespace {
+
+bool ForwardMultipartRequest(const httplib::Request &req,
+                             httplib::Response &res,
+                             const std::string &task_type_str,
+                             const std::string &real_url_param,
+                             const SrvInfo &srv_info,
+                             TimeRecord<std::chrono::milliseconds> &time_record,
+                             TimeRecord<std::chrono::milliseconds> &time_record_schedule) {
+    std::string origin_host_ip = req.remote_addr;
+    int origin_host_port = req.remote_port;
+    std::string transfer_host_ip = req.local_addr;
+    int transfer_host_port = req.local_port;
+    std::string tgt_host_ip = srv_info.ip;
+    int tgt_host_port = srv_info.port;
+
+    httplib::Client cli(tgt_host_ip, tgt_host_port);
+    httplib::MultipartFormDataItems items;
+    for (auto file: req.files) {
+        items.push_back(file.second);
+    }
+
+    httplib::Result response;
+    try {
+        response = cli.Post("/" + real_url_param, items);
+    } catch (const std::exception &e) {
+        std::cerr << req.path << "  Error sending request: " << e.what() << std::endl;
+        res.status = 500;
+        res.set_content("Internal Server Error", "text/plain");
+        return false;
+    }
+
+    if (response != nullptr && response->status != -1) {
+        res.status = response->status;
+        res.set_header("Content-Type", response->get_header_value("Content-Type"));
+
+        time_record.endRecord();
+        spdlog::info(
+            "URL: {},task_type_str:{}, real_url_param:{} origin_host_ip: {}:{}, transfer_host_ip: {}:{}, tgt_host_ip: {}:{}, duration_time:{}, time_record_schedule:{}",
+            req.path,
+            task_type_str,
+            real_url_param,
+            origin_host_ip,
+            origin_host_port,
+            transfer_host_ip,
+            transfer_host_port,
+            tgt_host_ip,
+            tgt_host_port,
+            time_record.getDuration(),
+            time_record_schedule.getDuration()
+        );
+        nlohmann::json jsonData = nlohmann::json::parse(response->body);
+        jsonData["gateway_time"] = (double) (time_record.getDuration());
+        res.body = jsonData.dump();
+        return true;
+    }
+
+    res.status = 502;
+    time_record.endRecord();
+    res.set_content("Bad Gateway", "text/plain");
+    spdlog::error(
+        "URL: {},task_type_str:{}, real_url_param:{} origin_host_ip: {}:{}, transfer_host_ip: {}:{}, tgt_host_ip: {}:{}, duration_time:{}, Error:{}",
+        req.path,
+        task_type_str,
+        real_url_param,
+        origin_host_ip,
+        origin_host_port,
+        transfer_host_ip,
+        transfer_host_port,
+        tgt_host_ip,
+        tgt_host_port,
+        time_record.getDuration(),
+        "Connection failed or response = nullptr"
+    );
+    return false;
+}
+
+}
+
 HttpServer::HttpServer(std::string ip, const int port, string absoulte_config_path) : ip(std::move(ip)), port(port) {
 }
 
@@ -20,6 +99,7 @@ bool HttpServer::Start() {
     httplib::Server svr;
     // 注册路由
     svr.Post(QUSET_ROUTE, this->HandleQuest);
+    svr.Post(QUEST_ON_NODE_ROUTE, this->HandleQuestOnNode);
     svr.Post(REGISTER_NODE_ROUTE, this->HandleRegisterNode);
     svr.Post("/hot_start", this->HandleHotStart);
     svr.Get(CLUSTER_RESOURCES_ROUTE, this->HandleClusterResources);
@@ -89,76 +169,46 @@ void HttpServer::HandleQuest(const httplib::Request &req, httplib::Response &res
     }
     // print in the end of quest
     time_record_schedule.endRecord();
+    ForwardMultipartRequest(req, res, task_type_str, real_url_param, srv_info_opt.value(), time_record, time_record_schedule);
+}
 
-    SrvInfo srv_info = srv_info_opt.value();
-    string origin_host_ip = req.remote_addr;
-    int origin_host_port = req.remote_port;
-    string transfer_host_ip = req.local_addr;
-    int transfer_host_port = req.local_port;
-    string tgt_host_ip = srv_info.ip;
-    int tgt_host_port = srv_info.port;
+void HttpServer::HandleQuestOnNode(const httplib::Request &req, httplib::Response &res) {
+    TimeRecord<std::chrono::milliseconds> time_record("HandleQuestOnNode");
+    time_record.startRecord();
 
-    httplib::Client cli(tgt_host_ip, tgt_host_port);
-    // Forward the request to the target host.
-    httplib::MultipartFormDataItems items;
-    for (auto file: req.files) {
-        items.push_back(file.second);
-    }
+    TimeRecord<std::chrono::milliseconds> time_record_schedule("schedule_on_node");
+    time_record_schedule.startRecord();
 
-    httplib::Result response;
-    try {
-        response = cli.Post("/" + real_url_param, items);
-    } catch (const std::exception &e) {
-        std::cerr << req.path << "  Error sending request: " << e.what() << std::endl;
-        res.status = 500;
-        res.set_content("Internal Server Error", "text/plain");
+    auto task_type_str = req.get_param_value("taskid");
+    auto target_global_id_str = req.get_param_value("target_global_id");
+    auto real_url_param = req.get_param_value("real_url");
+
+    TaskType task_type = StrToTaskType(task_type_str);
+    if (task_type == TaskType::Unknown || target_global_id_str.empty() || real_url_param.empty()) {
+        res.status = 400;
+        res.set_content("Missing or invalid taskid, target_global_id, or real_url parameter", "text/plain");
         return;
     }
 
-    if (response != nullptr && response->status != -1) {
-        // return to client
-        res.status = response->status;
-        res.set_header("Content-Type", response->get_header_value("Content-Type"));
-
-        time_record.endRecord();
-        // append gateway_time to response
-
-        spdlog::info(
-            "URL: {},task_type_str:{}, real_url_param:{} origin_host_ip: {}:{}, transfer_host_ip: {}:{}, tgt_host_ip: {}:{}, duration_time:{}, time_record_schedule:{}",
-            req.path,
-            task_type_str,
-            real_url_param,
-            origin_host_ip,
-            origin_host_port,
-            transfer_host_ip,
-            transfer_host_port,
-            tgt_host_ip,
-            tgt_host_port,
-            time_record.getDuration(),
-            time_record_schedule.getDuration()
-        );
-        nlohmann::json jsonData = nlohmann::json::parse(response->body);
-        jsonData["gateway_time"] = (double) (time_record.getDuration());
-        res.body = jsonData.dump();
-    } else {
-        res.status = 502;
-        time_record.endRecord();
-        res.set_content("Bad Gateway", "text/plain");
-        spdlog::error(
-            "URL: {},task_type_str:{}, real_url_param:{} origin_host_ip: {}:{}, transfer_host_ip: {}:{}, tgt_host_ip: {}:{}, duration_time:{}, Error:{}",
-            req.path,
-            task_type_str,
-            real_url_param,
-            origin_host_ip,
-            origin_host_port,
-            transfer_host_ip,
-            transfer_host_port,
-            tgt_host_ip,
-            tgt_host_port,
-            time_record.getDuration(),
-            "Connection failed or response = nullptr"
-        );
+    boost::uuids::string_generator gen;
+    DeviceID target_device_id;
+    try {
+        target_device_id = gen(target_global_id_str);
+    } catch (const std::exception &) {
+        res.status = 400;
+        res.set_content("invalid target_global_id", "text/plain");
+        return;
     }
+
+    auto srv_info_opt = Docker_scheduler::getOrCrtSrvByTTypeOnDevice(task_type, target_device_id);
+    if (srv_info_opt == nullopt) {
+        res.status = 400;
+        res.set_content("failed to get or create target service on the selected node", "text/plain");
+        return;
+    }
+
+    time_record_schedule.endRecord();
+    ForwardMultipartRequest(req, res, task_type_str, real_url_param, srv_info_opt.value(), time_record, time_record_schedule);
 }
 
 void HttpServer::HandleRegisterNode(const httplib::Request &req, httplib::Response &res) {

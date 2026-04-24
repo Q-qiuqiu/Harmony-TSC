@@ -103,6 +103,8 @@ public:
     // get static_info
     static std::map<TaskType, std::map<DeviceType, StaticInfoItem>> getStaticInfo() ;
     static json getClusterResources();
+    static std::optional<Device> getDeviceById(const DeviceID &device_id);
+    static bool deviceSupportsTask(const DeviceID &device_id, TaskType ttype);
 
     static ImageInfo getImage(TaskType taskType, DeviceType devType);
 
@@ -119,6 +121,7 @@ public:
     /// @param TaskType ttype
     /// @return Selected SrvInfo
     static std::optional<SrvInfo> getOrCrtSrvByTType(TaskType ttype);
+    static std::optional<SrvInfo> getOrCrtSrvByTTypeOnDevice(TaskType ttype, const DeviceID &device_id);
 
     // create a new  container on a specific device
     static std::optional<SrvInfo> createContainerByTType(TaskType ttype, const Device &dev);

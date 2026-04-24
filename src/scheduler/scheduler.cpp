@@ -3,8 +3,89 @@
 #include<fstream>
 #include<thread>
 #include<chrono>
+#include <cerrno>
 #include <DockerClient.h>
 #include <random>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <unistd.h>
+
+namespace {
+
+constexpr auto kServiceReadyTimeout = std::chrono::seconds(20);
+constexpr auto kServiceReadyPollInterval = std::chrono::milliseconds(200);
+constexpr auto kServiceReadyConnectTimeout = std::chrono::milliseconds(200);
+
+bool IsPortListening(const std::string &ip, int port, std::chrono::milliseconds timeout) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) {
+        return false;
+    }
+
+    int flags = fcntl(sock, F_GETFL, 0);
+    if (flags < 0 || fcntl(sock, F_SETFL, flags | O_NONBLOCK) < 0) {
+        close(sock);
+        return false;
+    }
+
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (inet_pton(AF_INET, ip.c_str(), &addr.sin_addr) != 1) {
+        close(sock);
+        return false;
+    }
+
+    int ret = connect(sock, reinterpret_cast<sockaddr *>(&addr), sizeof(addr));
+    if (ret == 0) {
+        close(sock);
+        return true;
+    }
+
+    if (errno != EINPROGRESS) {
+        close(sock);
+        return false;
+    }
+
+    fd_set writefds;
+    FD_ZERO(&writefds);
+    FD_SET(sock, &writefds);
+
+    timeval tv{};
+    tv.tv_sec = static_cast<long>(timeout.count() / 1000);
+    tv.tv_usec = static_cast<long>((timeout.count() % 1000) * 1000);
+
+    ret = select(sock + 1, nullptr, &writefds, nullptr, &tv);
+    if (ret <= 0) {
+        close(sock);
+        return false;
+    }
+
+    int so_error = 0;
+    socklen_t len = sizeof(so_error);
+    if (getsockopt(sock, SOL_SOCKET, SO_ERROR, &so_error, &len) < 0) {
+        close(sock);
+        return false;
+    }
+
+    close(sock);
+    return so_error == 0;
+}
+
+bool WaitForServicePort(const std::string &ip, int port) {
+    const auto deadline = std::chrono::steady_clock::now() + kServiceReadyTimeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (IsPortListening(ip, port, kServiceReadyConnectTimeout)) {
+            return true;
+        }
+        std::this_thread::sleep_for(kServiceReadyPollInterval);
+    }
+    return false;
+}
+
+} // namespace
+
 std::map<TaskType, std::map<DeviceType, StaticInfoItem> > Docker_scheduler::static_info; // static task info
 
 std::shared_mutex Docker_scheduler::devs_mutex; //
@@ -335,6 +416,49 @@ std::optional<SrvInfo> Docker_scheduler::getOrCrtSrvByTType(TaskType ttype) {
     }
 }
 
+std::optional<SrvInfo> Docker_scheduler::getOrCrtSrvByTTypeOnDevice(TaskType ttype, const DeviceID &device_id) {
+    auto device_opt = getDeviceById(device_id);
+    if (!device_opt.has_value()) {
+        spdlog::error("No such device for task type:{}, device_id:{}",
+                      to_string(nlohmann::json(ttype)), boost::uuids::to_string(device_id));
+        return std::nullopt;
+    }
+
+    if (!deviceSupportsTask(device_id, ttype)) {
+        spdlog::error("Device does not support task type:{}, device_id:{}",
+                      to_string(nlohmann::json(ttype)), boost::uuids::to_string(device_id));
+        return std::nullopt;
+    }
+
+    Device tgt_dev = device_opt.value();
+    switch (tdMap[ttype][tgt_dev.global_id].dev_srv_info_status) {
+        case DevSrvInfoStatus::Creating: {
+            int index = 10;
+            while (tdMap[ttype][tgt_dev.global_id].dev_srv_info_status == Creating && index > 0) {
+                index--;
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            if (index <= 0 || tdMap[ttype][tgt_dev.global_id].dev_srv_info_status == NoExist) {
+                spdlog::error(
+                    "for Tasktype:{},devIp:{}, the target device is creating container but timed out or failed",
+                    to_string(nlohmann::json(ttype)), tgt_dev.ip_address);
+                return nullopt;
+            }
+            tdMap[ttype][tgt_dev.global_id].timer_callback.refresh();
+            return tdMap[ttype][tgt_dev.global_id].srv_infos[0];
+        }
+        case DevSrvInfoStatus::Running:
+            tdMap[ttype][tgt_dev.global_id].timer_callback.refresh();
+            return tdMap[ttype][tgt_dev.global_id].srv_infos[0];
+        case DevSrvInfoStatus::NoExist:
+            return createContainerByTType(ttype, tgt_dev);
+        default:
+            spdlog::error("unknown error,for Tasktype:{},device_ip:{}, getOrCrtSrvByTTypeOnDevice",
+                          to_string(nlohmann::json(ttype)), tgt_dev.ip_address);
+            return nullopt;
+    }
+}
+
 std::optional<SrvInfo> Docker_scheduler::createContainerByTType(TaskType ttype, const Device &dev) {
     DeviceType dtype = dev.type;
     StaticInfoItem static_info_item = static_info[ttype][dtype];
@@ -371,6 +495,15 @@ std::optional<SrvInfo> Docker_scheduler::createContainerByTType(TaskType ttype, 
     if (!start_res) {
         tdMap[ttype][dev.global_id].dev_srv_info_status = NoExist;
         spdlog::error("docker start container failed, container_id={}", container_id);
+        return nullopt;
+    }
+
+    if (!WaitForServicePort(dev.ip_address, static_info_item.imageInfo.host_port)) {
+        tdMap[ttype][dev.global_id].dev_srv_info_status = NoExist;
+        spdlog::error("service port not ready after container start, container_id={}, ip={}, port={}",
+                      container_id,
+                      dev.ip_address,
+                      static_info_item.imageInfo.host_port);
         return nullopt;
     }
 
@@ -447,6 +580,30 @@ json Docker_scheduler::getClusterResources() {
     }
 
     return nodes;
+}
+
+std::optional<Device> Docker_scheduler::getDeviceById(const DeviceID &device_id) {
+    std::shared_lock<std::shared_mutex> lock(devs_mutex);
+    auto it = device_static_info.find(device_id);
+    if (it == device_static_info.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+bool Docker_scheduler::deviceSupportsTask(const DeviceID &device_id, TaskType ttype) {
+    std::shared_lock<std::shared_mutex> lock(devs_mutex);
+    auto dev_it = device_static_info.find(device_id);
+    if (dev_it == device_static_info.end()) {
+        return false;
+    }
+
+    auto task_it = static_info.find(ttype);
+    if (task_it == static_info.end()) {
+        return false;
+    }
+
+    return task_it->second.find(dev_it->second.type) != task_it->second.end();
 }
 
 //尝试修改调度单位为单个任务
