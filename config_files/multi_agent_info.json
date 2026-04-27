@@ -1,0 +1,82 @@
+{
+  "sub_agents": {
+    "image_agent": {
+      "description": "Image reasoning agent that selects an on-board vision model and triggers gateway execution.",
+      "capabilities": [
+        "object_detection",
+        "image_classification",
+        "image_reasoning"
+      ],
+      "startup_overhead": {
+        "RK3588": {
+          "cpu_usage": 0.03,
+          "mem_usage": 0.02,
+          "xpu_usage": 0.4
+        },
+        "ATLAS_L": {
+          "cpu_usage": 0.04,
+          "mem_usage": 0.03,
+          "xpu_usage": 0.4
+        },
+        "ATLAS_H": {
+          "cpu_usage": 0.04,
+          "mem_usage": 0.03,
+          "xpu_usage": 0.4
+        }
+      },
+      "tools": {
+        "YoloV5": {
+          "task_type": "YoloV5",
+          "tool_kind": "vision_model",
+          "capabilities": [
+            "object_detection",
+            "multi_object_detection",
+            "bounding_box_estimation"
+          ],
+          "description": "Fast object detection model for locating multiple targets in an image."
+        },
+        "ResNet50": {
+          "task_type": "ResNet50",
+          "tool_kind": "vision_model",
+          "capabilities": [
+            "image_classification",
+            "single_label_classification"
+          ],
+          "description": "Image classification model with stronger accuracy but higher cost than MobileNet."
+        },
+        "MobileNet": {
+          "task_type": "MobileNet",
+          "tool_kind": "vision_model",
+          "capabilities": [
+            "image_classification",
+            "lightweight_classification",
+            "fast_inference"
+          ],
+          "description": "Lightweight image classification model optimized for speed and lower overhead."
+        }
+      },
+      "runtime": {
+        "RK3588": {
+          "container_name": "qwen3_1.7b_docker",
+          "image": "qwen3_1.7b_docker:latest",
+          "startup_timeout_sec": 40,
+          "cmds": [],
+          "args": [],
+          "host_config_privileged": true,
+          "env": [],
+          "host_config_binds": [
+            "/dev/dri:/dev/dri",
+            "/proc/device-tree:/proc/device-tree:ro",
+            "/root/models/Qwen3-1.7B-rk3588-w8a8.rkllm:/models/Qwen3-1.7B-rk3588-w8a8.rkllm"
+          ],
+          "devices": [],
+          "host_ip": "127.0.0.1",
+          "host_port": 8081,
+          "container_port": 8081,
+          "has_tty": false,
+          "network_config": "host"
+        }
+      }
+    }
+  }
+}

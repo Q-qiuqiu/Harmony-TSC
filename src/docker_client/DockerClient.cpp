@@ -65,13 +65,16 @@ string DockerClient::CreateContainer(string container_name, string image, vector
     req_json["Args"] = args;
     req_json["Tty"] = has_tty;
 
-    // 容器本身端口
-    // "ExposedPorts": {
-    //     "80/tcp": {}
-    // },
-    nlohmann::json exposed_ports_json;
-    exposed_ports_json[to_string(container_port)+"/tcp"] = null_obj_json;
-    req_json["ExposedPorts"] = exposed_ports_json;
+    const bool use_host_network = (network_config == "host");
+    if (!use_host_network) {
+        // 容器本身端口
+        // "ExposedPorts": {
+        //     "80/tcp": {}
+        // },
+        nlohmann::json exposed_ports_json;
+        exposed_ports_json[to_string(container_port)+"/tcp"] = null_obj_json;
+        req_json["ExposedPorts"] = exposed_ports_json;
+    }
 
 
 
@@ -101,17 +104,20 @@ string DockerClient::CreateContainer(string container_name, string image, vector
     nlohmann::json host_config_json;
     host_config_json ["Binds"] = host_config_binds; // volume映射关系"Binds": ["/tmp:/tmp"]
 
-     // PortBindings 容器端口和主机之间的映射关系
+    if (!use_host_network) {
+         // PortBindings 容器端口和主机之间的映射关系
+        vector<nlohmann::json> portbindings ;
+        nlohmann::json host_config_portbind_json;
+        host_config_portbind_json["HostIp"]= host_ip;
+        host_config_portbind_json["HostPort"] = to_string(host_port);
+        portbindings.push_back(host_config_portbind_json);
+        nlohmann::json single_container_port_json;
+        single_container_port_json[to_string(container_port)+"/tcp"] = portbindings; // single_container_port_json key是容器端口 绑定着一个数组，数组元素为本机ip:port
 
-    vector<nlohmann::json> portbindings ;
-    nlohmann::json host_config_portbind_json;
-    host_config_portbind_json["HostIp"]= host_ip;
-    host_config_portbind_json["HostPort"] = to_string(host_port);
-    portbindings.push_back(host_config_portbind_json);
-    nlohmann::json single_container_port_json;
-    single_container_port_json[to_string(container_port)+"/tcp"] = portbindings; // single_container_port_json key是容器端口 绑定着一个数组，数组元素为本机ip:port
-
-    host_config_json["PortBindings"] = single_container_port_json; // 设置单个portBinding 绑定容器端口和主机端口
+        host_config_json["PortBindings"] = single_container_port_json; // 设置单个portBinding 绑定容器端口和主机端口
+    } else {
+        host_config_json["NetworkMode"] = "host";
+    }
 
     // devices 映射关系
     vector<nlohmann::json> device_jsons;

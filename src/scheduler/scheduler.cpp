@@ -1,9 +1,11 @@
 #include"scheduler.h"
 #include<iostream>
+#include<algorithm>
 #include<fstream>
 #include<thread>
 #include<chrono>
 #include <cerrno>
+#include <filesystem>
 #include <DockerClient.h>
 #include <random>
 #include <arpa/inet.h>
@@ -14,8 +16,14 @@
 namespace {
 
 constexpr auto kServiceReadyTimeout = std::chrono::seconds(20);
+constexpr int kDefaultSubAgentStartupTimeoutSec = 20;
 constexpr auto kServiceReadyPollInterval = std::chrono::milliseconds(200);
 constexpr auto kServiceReadyConnectTimeout = std::chrono::milliseconds(200);
+
+struct SubAgentRuntimeConfig {
+    CreateContainerParam create_param;
+    int startup_timeout_sec;
+};
 
 bool IsPortListening(const std::string &ip, int port, std::chrono::milliseconds timeout) {
     int sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -73,8 +81,8 @@ bool IsPortListening(const std::string &ip, int port, std::chrono::milliseconds 
     return so_error == 0;
 }
 
-bool WaitForServicePort(const std::string &ip, int port) {
-    const auto deadline = std::chrono::steady_clock::now() + kServiceReadyTimeout;
+bool WaitForServicePort(const std::string &ip, int port, std::chrono::seconds timeout = kServiceReadyTimeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
     while (std::chrono::steady_clock::now() < deadline) {
         if (IsPortListening(ip, port, kServiceReadyConnectTimeout)) {
             return true;
@@ -82,6 +90,56 @@ bool WaitForServicePort(const std::string &ip, int port) {
         std::this_thread::sleep_for(kServiceReadyPollInterval);
     }
     return false;
+}
+
+std::optional<SubAgentRuntimeConfig> LoadSubAgentRuntimeConfig(const std::string &agent_name, DeviceType device_type) {
+    const auto profile_path = std::filesystem::path(ABSOLUTE_CONFIG_PATH) / "multi_agent_info.json";
+    std::ifstream file(profile_path);
+    if (!file.is_open()) {
+        spdlog::error("failed to open sub agent profile file: {}", profile_path.string());
+        return std::nullopt;
+    }
+
+    json profile_json;
+    try {
+        file >> profile_json;
+    } catch (const std::exception &e) {
+        spdlog::error("failed to parse sub agent profile file {}: {}", profile_path.string(), e.what());
+        return std::nullopt;
+    }
+
+    const auto device_type_str = json(device_type).get<std::string>();
+    if (!profile_json.contains("sub_agents") ||
+        !profile_json["sub_agents"].contains(agent_name) ||
+        !profile_json["sub_agents"][agent_name].contains("runtime") ||
+        !profile_json["sub_agents"][agent_name]["runtime"].contains(device_type_str)) {
+        spdlog::error("runtime config missing for agent:{} device_type:{}", agent_name, device_type_str);
+        return std::nullopt;
+    }
+
+    try {
+        const auto &runtime = profile_json["sub_agents"][agent_name]["runtime"][device_type_str];
+        CreateContainerParam create_param(
+            runtime.at("container_name").get<std::string>(),
+            runtime.at("image").get<std::string>(),
+            runtime.at("cmds").get<std::vector<std::string>>(),
+            runtime.at("args").get<std::vector<std::string>>(),
+            runtime.at("host_config_privileged").get<bool>(),
+            runtime.at("env").get<std::vector<std::string>>(),
+            runtime.at("host_config_binds").get<std::vector<std::string>>(),
+            runtime.at("devices").get<std::vector<std::string>>(),
+            runtime.at("host_ip").get<std::string>(),
+            runtime.at("host_port").get<int>(),
+            runtime.at("container_port").get<int>(),
+            runtime.at("has_tty").get<bool>(),
+            runtime.at("network_config").get<std::string>()
+        );
+        const int startup_timeout_sec = runtime.value("startup_timeout_sec", kDefaultSubAgentStartupTimeoutSec);
+        return SubAgentRuntimeConfig{create_param, startup_timeout_sec};
+    } catch (const std::exception &e) {
+        spdlog::error("invalid runtime config for agent:{} device_type:{} error:{}", agent_name, device_type_str, e.what());
+        return std::nullopt;
+    }
 }
 
 } // namespace
@@ -580,6 +638,51 @@ json Docker_scheduler::getClusterResources() {
     }
 
     return nodes;
+}
+
+std::optional<SrvInfo> Docker_scheduler::startSubAgentOnDevice(const std::string &agent_name, const DeviceID &device_id) {
+    auto device_opt = getDeviceById(device_id);
+    if (!device_opt.has_value()) {
+        spdlog::error("No such device when starting sub agent:{}, device_id:{}", agent_name, boost::uuids::to_string(device_id));
+        return std::nullopt;
+    }
+
+    Device dev = device_opt.value();
+    auto runtime_config_opt = LoadSubAgentRuntimeConfig(agent_name, dev.type);
+    if (!runtime_config_opt.has_value()) {
+        return std::nullopt;
+    }
+
+    const auto runtime_config = runtime_config_opt.value();
+    CreateContainerParam cparam = runtime_config.create_param;
+    const auto startup_timeout = std::chrono::seconds(std::max(runtime_config.startup_timeout_sec, 1));
+    string docker_version = GetDockerVersion(dev);
+    DockerClient docker_client(dev.ip_address, 2375, docker_version);
+
+    if (WaitForServicePort(dev.ip_address, cparam.host_port, startup_timeout)) {
+        spdlog::info("sub agent already reachable, agent_name:{}, ip:{}, port:{}", agent_name, dev.ip_address, cparam.host_port);
+        return SrvInfo{"", dev.ip_address, cparam.host_port};
+    }
+
+    string container_id = docker_client.CreateContainer(cparam);
+    if (!container_id.empty()) {
+        spdlog::info("sub agent container created, agent_name:{}, container_id:{}", agent_name, container_id);
+        if (!docker_client.StartContainer(container_id)) {
+            spdlog::error("failed to start newly created sub agent container, agent_name:{}, container_id:{}", agent_name, container_id);
+            return std::nullopt;
+        }
+    } else {
+        spdlog::info("sub agent container may already exist, try to start by name, agent_name:{}, container_name:{}", agent_name, cparam.container_name);
+        docker_client.StartContainer(cparam.container_name);
+    }
+
+    if (!WaitForServicePort(dev.ip_address, cparam.host_port, startup_timeout)) {
+        spdlog::error("sub agent port not ready after startup, agent_name:{}, ip:{}, port:{}, timeout_sec:{}",
+                      agent_name, dev.ip_address, cparam.host_port, runtime_config.startup_timeout_sec);
+        return std::nullopt;
+    }
+
+    return SrvInfo{"", dev.ip_address, cparam.host_port};
 }
 
 std::optional<Device> Docker_scheduler::getDeviceById(const DeviceID &device_id) {

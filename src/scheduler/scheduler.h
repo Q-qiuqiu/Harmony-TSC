@@ -103,6 +103,7 @@ public:
     // get static_info
     static std::map<TaskType, std::map<DeviceType, StaticInfoItem>> getStaticInfo() ;
     static json getClusterResources();
+    static std::optional<SrvInfo> startSubAgentOnDevice(const std::string &agent_name, const DeviceID &device_id);
     static std::optional<Device> getDeviceById(const DeviceID &device_id);
     static bool deviceSupportsTask(const DeviceID &device_id, TaskType ttype);
 

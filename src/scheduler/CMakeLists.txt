@@ -23,3 +23,4 @@ target_link_libraries(scheduler
         Boost::assert Boost::config Boost::throw_exception Boost::type_traits Boost::static_assert
 )
 
+target_compile_definitions(scheduler PUBLIC ABSOLUTE_CONFIG_PATH="${ABSOLUTE_CONFIG_PATH}")

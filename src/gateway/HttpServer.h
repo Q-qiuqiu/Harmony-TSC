@@ -11,6 +11,7 @@ const std::string QUEST_ON_NODE_ROUTE = "/quest_on_node";
 const std::string REGISTER_NODE_ROUTE = "/register_node";
 const std::string HOTSTART_ROUTE = "/hot_start";
 const std::string CLUSTER_RESOURCES_ROUTE = "/cluster_resources";
+const std::string START_SUB_AGENT_ROUTE = "/start_sub_agent";
 
 class HttpServer {
 public:
@@ -23,6 +24,7 @@ private:
     static void HandleRegisterNode(const httplib::Request &req, httplib::Response &res);
     static void HandleHotStart(const httplib::Request &req, httplib::Response &res);
     static void HandleClusterResources(const httplib::Request &req, httplib::Response &res);
+    static void HandleStartSubAgent(const httplib::Request &req, httplib::Response &res);
 
     std::string ip;
     int port;
