@@ -57,24 +57,35 @@
       },
       "runtime": {
         "RK3588": {
-          "container_name": "qwen3_1.7b_docker",
+          "container_name": "image_agent_qwen3_1_7b",
           "image": "qwen3_1.7b_docker:latest",
-          "startup_timeout_sec": 40,
-          "cmds": [],
+          "startup_timeout_sec": 60,
+          "cmds": [
+            "bash",
+            "/workspace/multi-agent/server/image_agent.sh"
+          ],
           "args": [],
           "host_config_privileged": true,
-          "env": [],
+          "env": [
+            "PYTHONUNBUFFERED=1",
+            "LLM_API_URL=http://127.0.0.1:8081/v1/chat/completions",
+            "IMAGE_AGENT_PORT=8083",
+            "RKLLM_MODEL_PATH=/models/Qwen3-1.7B-rk3588-w8a8.rkllm",
+            "RKLLM_TARGET_PLATFORM=rk3588"
+          ],
           "host_config_binds": [
+            "/root/edge-cluster-scheduler/multi-agent:/workspace/multi-agent",
+            "/root/edge-cluster-scheduler/config_files:/workspace/config_files",
             "/dev/dri:/dev/dri",
             "/proc/device-tree:/proc/device-tree:ro",
             "/root/models/Qwen3-1.7B-rk3588-w8a8.rkllm:/models/Qwen3-1.7B-rk3588-w8a8.rkllm"
           ],
           "devices": [],
-          "host_ip": "127.0.0.1",
-          "host_port": 8081,
-          "container_port": 8081,
+          "host_ip": "0.0.0.0",
+          "host_port": 8083,
+          "container_port": 8083,
           "has_tty": false,
-          "network_config": "host"
+          "network_config": "bridge"
         }
       }
     }

@@ -1,6 +1,5 @@
 #include "HttpServer.h"
 #include "scheduler.h"
-#include "SocketServer.h"
 #include <thread>
 //
 // Created by lxsa1 on 19/10/2024.
@@ -20,11 +19,6 @@ int main() {
         HttpServer http_server(addr, port, absoulte_config_path);
         http_server.Start();
     }).detach();
-
-    const std::string addr = "0.0.0.0";
-    const int port = 7777;
-    SocketServer sock_server(addr, port);
-    sock_server.Start();
 
     while (true) {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));

@@ -1,8 +1,6 @@
 add_executable(gateway
         main.cpp
         HttpServer.cpp
-        SocketServer.cpp
-        SocketServer.h
 )
 
 target_include_directories(gateway
