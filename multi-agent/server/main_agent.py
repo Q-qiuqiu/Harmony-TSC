@@ -54,21 +54,51 @@ def build_main_agent_messages(user_text, cluster_resources, sub_agent_catalog):
     ]
 
 
+def filter_nodes_for_sub_agent(cluster_resources, sub_agent_name):
+    sub_agent_catalog = load_sub_agent_catalog()
+    profile = sub_agent_catalog.get(sub_agent_name)
+    if not isinstance(profile, dict):
+        raise RuntimeError(f"sub agent profile not found: {sub_agent_name}")
+
+    runtime = profile.get("runtime", {})
+    if not isinstance(runtime, dict) or not runtime:
+        raise RuntimeError(f"sub agent runtime config missing: {sub_agent_name}")
+
+    supported_device_types = set(runtime.keys())
+    filtered_nodes = [
+        node
+        for node in cluster_resources.get("result", [])
+        if isinstance(node, dict) and node.get("type") in supported_device_types
+    ]
+
+    if not filtered_nodes:
+        raise RuntimeError(
+            f"no registered nodes support sub agent {sub_agent_name}; supported device types: {sorted(supported_device_types)}"
+        )
+
+    return {
+        "status": cluster_resources.get("status", "success"),
+        "result": filtered_nodes,
+    }
+
+
 def select_target_node_for_sub_agent(user_text, cluster_resources):
     sub_agent_catalog = load_sub_agent_catalog()
+    sub_agent_name = "image_agent"
+    filtered_cluster_resources = filter_nodes_for_sub_agent(cluster_resources, sub_agent_name)
     model_result = call_llm(
-        build_main_agent_messages(user_text, cluster_resources, sub_agent_catalog),
+        build_main_agent_messages(user_text, filtered_cluster_resources, sub_agent_catalog),
         llm_api_url=LLM_API_URL,
         model_name=LLM_MODEL_NAME,
     )
     selection = parse_json_object(model_result["content"])
-    selection["sub_agent"] = "image_agent"
+    selection["sub_agent"] = sub_agent_name
 
     target_global_id = selection.get("target_global_id")
     if not target_global_id:
         raise RuntimeError("main agent selection missing target_global_id")
 
-    for node in cluster_resources.get("result", []):
+    for node in filtered_cluster_resources.get("result", []):
         if isinstance(node, dict) and node.get("global_id") == target_global_id:
             selection["_usage"] = {
                 "prompt_tokens": model_result["prompt_tokens"],
@@ -88,7 +118,7 @@ def ensure_sub_agent_started(agent_name, target_global_id):
                 "agent_name": agent_name,
                 "target_global_id": target_global_id,
             },
-            timeout=90,
+            timeout=150,
         )
     )
     if start_result.get("status") != "success":

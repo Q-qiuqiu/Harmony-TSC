@@ -239,7 +239,7 @@ void HttpServer::HandleHotStart(const httplib::Request &req, httplib::Response &
 
 void HttpServer::HandleClusterResources(const httplib::Request &req, httplib::Response &res) {
     (void) req;
-    spdlog::info("Fetching cluster resources...");
+    spdlog::info("Fetched cluster resources");
     json response;
     response["status"] = "success";
     response["result"] = Docker_scheduler::getClusterResources();
