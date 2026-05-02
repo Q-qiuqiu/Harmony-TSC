@@ -228,6 +228,7 @@ bool DockerClient::StartContainer(string container_id) {
                 break;
             case httplib::StatusCode::NotModified_304:
                 cout << "container already started" << endl;
+                return true;
                 break;
             case httplib::StatusCode::NotFound_404:
                 cout << "no such container" << endl;

@@ -20,6 +20,7 @@ constexpr int kDefaultSubAgentStartupTimeoutSec = 20;
 constexpr auto kServiceReadyPollInterval = std::chrono::milliseconds(200);
 constexpr auto kServiceReadyConnectTimeout = std::chrono::milliseconds(200);
 constexpr auto kExistingSubAgentProbeTimeout = std::chrono::seconds(2);
+constexpr auto kTaskServiceStartupTimeout = std::chrono::seconds(180);
 constexpr int kMaxDeviceInfoFailureCount = 3;
 
 struct SubAgentRuntimeConfig {
@@ -493,6 +494,16 @@ std::optional<SrvInfo> Docker_scheduler::getOrCrtSrvByTType(TaskType ttype) {
         }
         case DevSrvInfoStatus::Running:
             // refresh timeCallBack when access
+            if (tdMap[ttype][tgt_dev.global_id].srv_infos.empty() ||
+                !WaitForServicePort(tgt_dev.ip_address,
+                                    tdMap[ttype][tgt_dev.global_id].srv_infos[0].port,
+                                    kExistingSubAgentProbeTimeout)) {
+                spdlog::error("running service is not reachable, recreate container, task_type:{}, ip:{}",
+                              to_string(nlohmann::json(ttype)), tgt_dev.ip_address);
+                tdMap[ttype][tgt_dev.global_id].srv_infos.clear();
+                tdMap[ttype][tgt_dev.global_id].dev_srv_info_status = NoExist;
+                return createContainerByTType(ttype, tgt_dev);
+            }
             tdMap[ttype][tgt_dev.global_id].timer_callback.refresh();
         spdlog::info("ttype:{}, ip:{} timeCallBack refresh, lastTime={}, intervalTime={}",  to_string(nlohmann::json(ttype)), tgt_dev.ip_address, tdMap[ttype][tgt_dev.global_id].timer_callback.getElapsedTime(),  tdMap[ttype][tgt_dev.global_id].timer_callback.getIntervalTime());
             return tdMap[ttype][tgt_dev.global_id].srv_infos[0];
@@ -538,6 +549,16 @@ std::optional<SrvInfo> Docker_scheduler::getOrCrtSrvByTTypeOnDevice(TaskType tty
             return tdMap[ttype][tgt_dev.global_id].srv_infos[0];
         }
         case DevSrvInfoStatus::Running:
+            if (tdMap[ttype][tgt_dev.global_id].srv_infos.empty() ||
+                !WaitForServicePort(tgt_dev.ip_address,
+                                    tdMap[ttype][tgt_dev.global_id].srv_infos[0].port,
+                                    kExistingSubAgentProbeTimeout)) {
+                spdlog::error("target running service is not reachable, recreate container, task_type:{}, ip:{}",
+                              to_string(nlohmann::json(ttype)), tgt_dev.ip_address);
+                tdMap[ttype][tgt_dev.global_id].srv_infos.clear();
+                tdMap[ttype][tgt_dev.global_id].dev_srv_info_status = NoExist;
+                return createContainerByTType(ttype, tgt_dev);
+            }
             tdMap[ttype][tgt_dev.global_id].timer_callback.refresh();
             return tdMap[ttype][tgt_dev.global_id].srv_infos[0];
         case DevSrvInfoStatus::NoExist:
@@ -572,28 +593,37 @@ std::optional<SrvInfo> Docker_scheduler::createContainerByTType(TaskType ttype, 
     DockerClient docker_client(dev.ip_address, 2375, docker_version);
     // first set Creating tag
     tdMap[ttype][dev.global_id].dev_srv_info_status = Creating;
+    tdMap[ttype][dev.global_id].srv_infos.clear();
     // then invoke api
     string container_id = docker_client.CreateContainer(cparam);
+    bool container_started = false;
     if (container_id.empty()) {
-        tdMap[ttype][dev.global_id].dev_srv_info_status = NoExist;
-        spdlog::error("docker_client.CreateContainer failed, para:{}", container_id, cparam.toString());
-        return nullopt;
+        spdlog::error("docker_client.CreateContainer failed, try start existing container by name, para:{}", cparam.toString());
+        container_id = cparam.container_name;
+        if (!docker_client.StartContainer(container_id)) {
+            tdMap[ttype][dev.global_id].dev_srv_info_status = NoExist;
+            spdlog::error("docker start existing container failed, container_name={}", container_id);
+            return nullopt;
+        }
+        container_started = true;
+    } else {
+        spdlog::info("docker_client.CreateContainer Success, para:{}, ret:{}", container_id, cparam.toString());
     }
-    spdlog::info("docker_client.CreateContainer Success, para:{}, ret:{}", container_id, cparam.toString());
 
-    bool start_res = docker_client.StartContainer(container_id);
+    bool start_res = container_started || docker_client.StartContainer(container_id);
     if (!start_res) {
         tdMap[ttype][dev.global_id].dev_srv_info_status = NoExist;
         spdlog::error("docker start container failed, container_id={}", container_id);
         return nullopt;
     }
 
-    if (!WaitForServicePort(dev.ip_address, static_info_item.imageInfo.host_port)) {
+    if (!WaitForServicePort(dev.ip_address, static_info_item.imageInfo.host_port, kTaskServiceStartupTimeout)) {
         tdMap[ttype][dev.global_id].dev_srv_info_status = NoExist;
-        spdlog::error("service port not ready after container start, container_id={}, ip={}, port={}",
+        spdlog::error("service port not ready after container start, container_id={}, ip={}, port={}, timeout_sec:{}",
                       container_id,
                       dev.ip_address,
-                      static_info_item.imageInfo.host_port);
+                      static_info_item.imageInfo.host_port,
+                      kTaskServiceStartupTimeout.count());
         return nullopt;
     }
 

@@ -7,6 +7,7 @@ from agent_tools import (
     DEFAULT_IMAGE_AGENT_URL,
     DEFAULT_LLM_API_URL,
     DEFAULT_LLM_MODEL_NAME,
+    DEFAULT_SEGMENTATION_AGENT_URL,
     DEFAULT_TEXT_AGENT_URL,
     call_llm,
     call_mcp_tool,
@@ -27,12 +28,43 @@ LLM_API_URL = DEFAULT_LLM_API_URL
 LLM_MODEL_NAME = DEFAULT_LLM_MODEL_NAME
 IMAGE_AGENT_URL = DEFAULT_IMAGE_AGENT_URL
 TEXT_AGENT_URL = DEFAULT_TEXT_AGENT_URL
+SEGMENTATION_AGENT_URL = DEFAULT_SEGMENTATION_AGENT_URL
 
 SUB_AGENT_ENDPOINTS = {
     "image_agent": "/v1/sub-agents/image/execute",
     "text_agent": "/v1/sub-agents/text/execute",
+    "segmentation_agent": "/v1/sub-agents/segmentation/execute",
 }
 SUPPORTED_SUB_AGENTS = set(SUB_AGENT_ENDPOINTS.keys())
+
+
+def build_sub_agent_selection_messages(user_text, has_image, sub_agent_catalog):
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a main multi-agent scheduler.\n"
+                "Your first job is to select the best sub agent for the user request.\n"
+                "Return JSON only with this schema:\n"
+                "{\"sub_agent\":\"image_agent\",\"reason\":\"<short reason>\"}\n"
+                "Rules:\n"
+                "1. sub_agent must be one of the provided sub_agent_catalog keys.\n"
+                "2. Choose text_agent for text understanding or text classification requests.\n"
+                "3. Choose segmentation_agent for image segmentation requests.\n"
+                "4. Choose image_agent for other image detection, classification, or image reasoning requests.\n"
+                "5. If the chosen agent requires an image but has_image is false, choose a text-capable agent instead.\n"
+                "6. Never output anything except a single JSON object."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"user_text:\n{user_text}\n\n"
+                f"has_image:\n{json.dumps(has_image)}\n\n"
+                f"sub_agent_catalog:\n{json.dumps(sub_agent_catalog, ensure_ascii=False)}"
+            ),
+        },
+    ]
 
 
 def build_main_agent_messages(user_text, cluster_resources, sub_agent_catalog, sub_agent_name):
@@ -64,6 +96,7 @@ def build_main_agent_messages(user_text, cluster_resources, sub_agent_catalog, s
 
 
 def build_final_answer_messages(user_text, sub_agent_name, sub_agent_response):
+    summarized_response = redact_large_binary_fields(sub_agent_response)
     return [
         {
             "role": "system",
@@ -81,10 +114,24 @@ def build_final_answer_messages(user_text, sub_agent_name, sub_agent_response):
             "content": (
                 f"user_text:\n{user_text}\n\n"
                 f"sub_agent:\n{sub_agent_name}\n\n"
-                f"sub_agent_response:\n{json.dumps(sub_agent_response, ensure_ascii=False)}"
+                f"sub_agent_response:\n{json.dumps(summarized_response, ensure_ascii=False)}"
             ),
         },
     ]
+
+
+def redact_large_binary_fields(value):
+    if isinstance(value, dict):
+        redacted = {}
+        for key, item in value.items():
+            if key.endswith("_b64") or key in {"binary_b64", "image_b64"}:
+                redacted[key] = "<binary image data omitted>"
+            else:
+                redacted[key] = redact_large_binary_fields(item)
+        return redacted
+    if isinstance(value, list):
+        return [redact_large_binary_fields(item) for item in value]
+    return value
 
 
 def make_final_answer(user_text, sub_agent_name, sub_agent_response):
@@ -105,15 +152,45 @@ def parse_bool_form_value(value):
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def detect_requested_sub_agent(text_fields, image_file):
+def select_sub_agent(user_text, has_image, forced_sub_agent=None):
+    if forced_sub_agent:
+        if forced_sub_agent not in SUPPORTED_SUB_AGENTS:
+            raise RuntimeError(f"unsupported sub_agent: {forced_sub_agent}")
+        return {
+            "sub_agent": forced_sub_agent,
+            "reason": "sub_agent explicitly requested by client",
+            "_usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            },
+        }
+
+    sub_agent_catalog = load_sub_agent_catalog()
+    model_result = call_llm(
+        build_sub_agent_selection_messages(user_text, has_image, sub_agent_catalog),
+        llm_api_url=LLM_API_URL,
+        model_name=LLM_MODEL_NAME,
+    )
+    selection = parse_json_object(model_result["content"])
+    sub_agent_name = selection.get("sub_agent")
+    if sub_agent_name not in SUPPORTED_SUB_AGENTS:
+        raise RuntimeError(f"main agent selected unsupported sub_agent: {sub_agent_name}")
+    if sub_agent_name in {"image_agent", "segmentation_agent"} and not has_image:
+        raise RuntimeError(f"main agent selected {sub_agent_name}, but request has no image")
+    selection["_usage"] = {
+        "prompt_tokens": model_result["prompt_tokens"],
+        "completion_tokens": model_result["completion_tokens"],
+    }
+    return selection
+
+
+def get_forced_sub_agent(text_fields):
     requested_sub_agent = (text_fields.get("sub_agent") or "").strip()
     if requested_sub_agent:
         if requested_sub_agent not in SUPPORTED_SUB_AGENTS:
             raise RuntimeError(f"unsupported sub_agent: {requested_sub_agent}")
         return requested_sub_agent
-    if image_file is not None and image_file.filename:
-        return "image_agent"
-    return "text_agent"
+    return None
 
 
 def filter_nodes_for_sub_agent(cluster_resources, sub_agent_name):
@@ -200,6 +277,8 @@ def resolve_sub_agent_url(agent_name, start_result):
         return IMAGE_AGENT_URL
     if agent_name == "text_agent":
         return TEXT_AGENT_URL
+    if agent_name == "segmentation_agent":
+        return SEGMENTATION_AGENT_URL
     raise RuntimeError(f"unknown sub agent fallback url: {agent_name}")
 
 
@@ -212,9 +291,9 @@ def invoke_sub_agent(selection, user_text, image_file):
     }
     files = []
 
-    if sub_agent_name == "image_agent":
+    if sub_agent_name in {"image_agent", "segmentation_agent"}:
         if image_file is None or not image_file.filename:
-            raise RuntimeError("image_agent requires an uploaded image")
+            raise RuntimeError(f"{sub_agent_name} requires an uploaded image")
         image_bytes = image_file.read()
         files.append(
             {
@@ -272,7 +351,7 @@ def multi_agent_chat():
 
     try:
         user_text = choose_user_text(request_controls)
-        sub_agent_name = detect_requested_sub_agent(text_fields, image_file)
+        forced_sub_agent = get_forced_sub_agent(text_fields)
     except RuntimeError as exc:
         return jsonify({
             "error": {
@@ -288,19 +367,24 @@ def multi_agent_chat():
         is_blocking = True
 
         cluster_resources = json.loads(call_mcp_tool("get_cluster_resources"))
+        sub_agent_selection = select_sub_agent(user_text, image_file is not None and bool(image_file.filename), forced_sub_agent)
+        sub_agent_name = sub_agent_selection["sub_agent"]
         selection = select_target_node_for_sub_agent(user_text, cluster_resources, sub_agent_name)
         sub_agent_response, start_result, sub_agent_url = invoke_sub_agent(selection, user_text, image_file)
         final_message, final_usage = make_final_answer(user_text, sub_agent_name, sub_agent_response)
 
+        sub_agent_select_usage = sub_agent_selection["_usage"]
         main_usage = selection["_usage"]
         sub_usage = sub_agent_response.get("usage", {})
         prompt_tokens = (
-            main_usage["prompt_tokens"]
+            sub_agent_select_usage["prompt_tokens"]
+            + main_usage["prompt_tokens"]
             + sub_usage.get("prompt_tokens", 0)
             + final_usage.get("prompt_tokens", 0)
         )
         completion_tokens = (
-            main_usage["completion_tokens"]
+            sub_agent_select_usage["completion_tokens"]
+            + main_usage["completion_tokens"]
             + sub_usage.get("completion_tokens", 0)
             + final_usage.get("completion_tokens", 0)
         )
@@ -309,11 +393,15 @@ def multi_agent_chat():
             "object": "multi_agent.chat",
             "message": final_message,
         }
+        result_image = sub_agent_response.get("result_image")
+        if result_image:
+            response_payload["result_image"] = result_image
 
         if debug_response:
             response_payload.update({
                 "main_agent_selection": {
                     "sub_agent": selection["sub_agent"],
+                    "sub_agent_reason": sub_agent_selection.get("reason", ""),
                     "target_global_id": selection["target_global_id"],
                     "reason": selection.get("reason", ""),
                     "target_node": selection["target_node"],
@@ -351,11 +439,13 @@ if __name__ == "__main__":
     parser.add_argument("--llm_model_name", default=DEFAULT_LLM_MODEL_NAME)
     parser.add_argument("--image_agent_url", default=DEFAULT_IMAGE_AGENT_URL)
     parser.add_argument("--text_agent_url", default=DEFAULT_TEXT_AGENT_URL)
+    parser.add_argument("--segmentation_agent_url", default=DEFAULT_SEGMENTATION_AGENT_URL)
     args = parser.parse_args()
 
     LLM_API_URL = args.llm_api_url
     LLM_MODEL_NAME = args.llm_model_name
     IMAGE_AGENT_URL = args.image_agent_url
     TEXT_AGENT_URL = args.text_agent_url
+    SEGMENTATION_AGENT_URL = args.segmentation_agent_url
 
     app.run(host=args.host, port=args.port, threaded=True, debug=False)

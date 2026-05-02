@@ -18,6 +18,22 @@ TASK_TYPE_TO_TASK_ID = {
 }
 
 
+def _normalize_latin1_image_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    image_value = payload.get("image")
+    if not isinstance(image_value, str):
+        return payload
+
+    normalized = dict(payload)
+    try:
+        image_bytes = image_value.encode("latin1")
+    except UnicodeEncodeError:
+        image_bytes = image_value.encode("utf-8", errors="surrogatepass")
+    normalized["image_b64"] = base64.b64encode(image_bytes).decode("ascii")
+    normalized.setdefault("content_type", "image/jpeg")
+    normalized.pop("image", None)
+    return normalized
+
+
 def _gateway_host() -> str:
     return os.environ.get("GATEWAY_HOST", "127.0.0.1")
 
@@ -157,9 +173,12 @@ def run_task_on_node(arguments: dict[str, Any]) -> dict[str, Any]:
         raise RuntimeError(f"failed to reach gateway at {url}: {exc.reason}") from exc
 
     try:
-        return json.loads(response_body)
+        payload = json.loads(response_body)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"gateway returned invalid JSON: {exc}") from exc
+    if isinstance(payload, dict) and task_type == "deeplabv3":
+        return _normalize_latin1_image_payload(payload)
+    return payload
 
 
 def run_vision_task_on_node(arguments: dict[str, Any]) -> dict[str, Any]:

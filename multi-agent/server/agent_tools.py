@@ -17,6 +17,7 @@ DEFAULT_LLM_API_URL = "http://127.0.0.1:8081/v1/chat/completions"
 DEFAULT_LLM_MODEL_NAME = "rkllm-default"
 DEFAULT_IMAGE_AGENT_URL = "http://127.0.0.1:8083/v1/sub-agents/image/execute"
 DEFAULT_TEXT_AGENT_URL = "http://127.0.0.1:8085/v1/sub-agents/text/execute"
+DEFAULT_SEGMENTATION_AGENT_URL = "http://127.0.0.1:8086/v1/sub-agents/segmentation/execute"
 DEFAULT_SUB_AGENT_PROFILE_PATH = os.path.join(REPO_ROOT, "config_files", "multi_agent_info.json")
 
 

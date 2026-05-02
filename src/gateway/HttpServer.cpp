@@ -15,6 +15,31 @@ using json = nlohmann::json;
 
 namespace {
 
+std::string Base64Encode(const std::string &input) {
+    static constexpr char kBase64Chars[] =
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            "abcdefghijklmnopqrstuvwxyz"
+            "0123456789+/";
+    std::string output;
+    int val = 0;
+    int valb = -6;
+    for (unsigned char c: input) {
+        val = (val << 8) + c;
+        valb += 8;
+        while (valb >= 0) {
+            output.push_back(kBase64Chars[(val >> valb) & 0x3F]);
+            valb -= 6;
+        }
+    }
+    if (valb > -6) {
+        output.push_back(kBase64Chars[((val << 8) >> (valb + 8)) & 0x3F]);
+    }
+    while (output.size() % 4) {
+        output.push_back('=');
+    }
+    return output;
+}
+
 bool ForwardMultipartRequest(const httplib::Request &req,
                              httplib::Response &res,
                              const std::string &task_type_str,
@@ -47,7 +72,7 @@ bool ForwardMultipartRequest(const httplib::Request &req,
 
     if (response != nullptr && response->status != -1) {
         res.status = response->status;
-        res.set_header("Content-Type", response->get_header_value("Content-Type"));
+        const auto response_content_type = response->get_header_value("Content-Type");
 
         time_record.endRecord();
         spdlog::info(
@@ -64,9 +89,18 @@ bool ForwardMultipartRequest(const httplib::Request &req,
             time_record.getDuration(),
             time_record_schedule.getDuration()
         );
-        nlohmann::json jsonData = nlohmann::json::parse(response->body);
-        jsonData["gateway_time"] = (double) (time_record.getDuration());
-        res.body = jsonData.dump();
+        try {
+            nlohmann::json jsonData = nlohmann::json::parse(response->body);
+            jsonData["gateway_time"] = (double) (time_record.getDuration());
+            res.set_content(jsonData.dump(), "application/json");
+        } catch (const std::exception &) {
+            nlohmann::json jsonData;
+            jsonData["status"] = "success";
+            jsonData["content_type"] = response_content_type.empty() ? "application/octet-stream" : response_content_type;
+            jsonData["binary_b64"] = Base64Encode(response->body);
+            jsonData["gateway_time"] = (double) (time_record.getDuration());
+            res.set_content(jsonData.dump(), "application/json");
+        }
         return true;
     }
 

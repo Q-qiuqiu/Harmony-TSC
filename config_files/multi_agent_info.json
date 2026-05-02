@@ -147,6 +147,65 @@
           "network_config": "bridge"
         }
       }
+    },
+    "segmentation_agent": {
+      "description": "Image segmentation agent that routes segmentation requests to the on-board deeplabv3 service.",
+      "capabilities": [
+        "semantic_segmentation",
+        "image_segmentation",
+        "segmentation_visualization"
+      ],
+      "startup_overhead": {
+        "RK3588": {
+          "cpu_usage": 0.03,
+          "mem_usage": 0.02,
+          "xpu_usage": 0.4
+        }
+      },
+      "tools": {
+        "deeplabv3": {
+          "task_type": "deeplabv3",
+          "tool_kind": "segmentation_model",
+          "capabilities": [
+            "semantic_segmentation",
+            "mask_generation",
+            "segmentation_image_output"
+          ],
+          "description": "DeepLabV3 segmentation model deployed on Atlas nodes. It accepts multipart form-data field image at /segmentation and returns the segmented image."
+        }
+      },
+      "runtime": {
+        "RK3588": {
+          "container_name": "segmentation_agent_qwen3_1_7b",
+          "image": "qwen3_1.7b_docker:latest",
+          "startup_timeout_sec": 180,
+          "cmds": [
+            "bash",
+            "/workspace/multi-agent/server/segmentation_agent.sh"
+          ],
+          "args": [],
+          "host_config_privileged": true,
+          "env": [
+            "PYTHONUNBUFFERED=1",
+            "SEGMENTATION_AGENT_PORT=8086",
+            "RKLLM_MODEL_PATH=/models/Qwen3-1.7B-rk3588-w8a8.rkllm",
+            "RKLLM_TARGET_PLATFORM=rk3588"
+          ],
+          "host_config_binds": [
+            "/root/edge-cluster-scheduler/multi-agent:/workspace/multi-agent",
+            "/root/edge-cluster-scheduler/config_files:/workspace/config_files",
+            "/dev/dri:/dev/dri",
+            "/proc/device-tree:/proc/device-tree:ro",
+            "/root/models/Qwen3-1.7B-rk3588-w8a8.rkllm:/models/Qwen3-1.7B-rk3588-w8a8.rkllm"
+          ],
+          "devices": [],
+          "host_ip": "0.0.0.0",
+          "host_port": 8086,
+          "container_port": 8086,
+          "has_tty": false,
+          "network_config": "bridge"
+        }
+      }
     }
   }
 }

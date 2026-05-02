@@ -3,13 +3,21 @@ import json
 import threading
 from flask import Flask, Response, jsonify, request
 
-from agent_tools import call_mcp_tool
+from agent_tools import (
+    DEFAULT_LLM_API_URL,
+    DEFAULT_LLM_MODEL_NAME,
+    call_llm,
+    call_mcp_tool,
+    parse_json_object,
+)
 
 
 app = Flask(__name__)
 
 lock = threading.Lock()
 is_blocking = False
+LLM_API_URL = DEFAULT_LLM_API_URL
+LLM_MODEL_NAME = DEFAULT_LLM_MODEL_NAME
 
 
 def build_execution_candidates(cluster_resources, task_catalog, sub_agent_profile):
@@ -49,22 +57,60 @@ def build_execution_candidates(cluster_resources, task_catalog, sub_agent_profil
     return candidates
 
 
-def choose_execution_target(execution_candidates):
-    ranked_candidates = sorted(
-        execution_candidates,
-        key=lambda item: (
-            item.get("overhead", {}).get("xpu_usage", 1e9),
-            item.get("overhead", {}).get("proc_time", 1e9),
-        ),
+def build_execution_selection_messages(user_text, execution_candidates, sub_agent_profile):
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are a text agent.\n"
+                "Your job is to choose the best text model execution target for the request.\n"
+                "Use only the provided execution candidates and sub agent profile.\n"
+                "Return JSON only with this schema:\n"
+                "{\"task_type\":\"Bert\",\"target_global_id\":\"<uuid>\",\"reason\":\"<short reason>\"}\n"
+                "Rules:\n"
+                "1. task_type and target_global_id must come from execution_candidates.\n"
+                "2. Prefer candidates that satisfy the task intent with enough remaining resources and lower overhead.\n"
+                "3. Never output anything except a single JSON object."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"user_text:\n{user_text}\n\n"
+                f"sub_agent_profile:\n{json.dumps(sub_agent_profile, ensure_ascii=False)}\n\n"
+                f"execution_candidates:\n{json.dumps(execution_candidates, ensure_ascii=False)}"
+            ),
+        },
+    ]
+
+
+def choose_execution_target(user_text, execution_candidates, sub_agent_profile):
+    model_result = call_llm(
+        build_execution_selection_messages(user_text, execution_candidates, sub_agent_profile),
+        llm_api_url=LLM_API_URL,
+        model_name=LLM_MODEL_NAME,
     )
-    candidate = ranked_candidates[0]
+    selection = parse_json_object(model_result["content"])
+    task_type = selection.get("task_type")
+    target_global_id = selection.get("target_global_id")
+
+    candidate = None
+    for item in execution_candidates:
+        if item.get("task_type") == task_type and item.get("target_global_id") == target_global_id:
+            candidate = item
+            break
+    if candidate is None:
+        raise RuntimeError(
+            f"text agent selected unsupported execution pair: task_type={task_type}, target_global_id={target_global_id}"
+        )
+
     return {
-        "task_type": candidate["task_type"],
-        "target_global_id": candidate["target_global_id"],
+        "task_type": task_type,
+        "target_global_id": target_global_id,
         "real_url": "textclassify",
-        "reason": "text_agent selected the available Atlas Bert endpoint with the lowest declared overhead.",
+        "reason": selection.get("reason", ""),
         "candidate": candidate,
-    }
+    }, model_result
 
 
 def summarize_tool_result(tool_result):
@@ -109,7 +155,7 @@ def run_text_sub_agent(user_text, target_node, sub_agent_profile):
     )
 
     execution_candidates = build_execution_candidates(cluster_resources, task_catalog, sub_agent_profile)
-    selected_execution = choose_execution_target(execution_candidates)
+    selected_execution, selection_usage = choose_execution_target(user_text, execution_candidates, sub_agent_profile)
     tool_result = json.loads(
         call_mcp_tool(
             "run_task_on_node",
@@ -129,9 +175,9 @@ def run_text_sub_agent(user_text, target_node, sub_agent_profile):
         "selected_execution": selected_execution,
         "tool_result": tool_result,
         "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
+            "prompt_tokens": selection_usage["prompt_tokens"],
+            "completion_tokens": selection_usage["completion_tokens"],
+            "total_tokens": selection_usage["prompt_tokens"] + selection_usage["completion_tokens"],
         },
     }
 
@@ -216,5 +262,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8085)
+    parser.add_argument("--llm_api_url", default=DEFAULT_LLM_API_URL)
+    parser.add_argument("--llm_model_name", default=DEFAULT_LLM_MODEL_NAME)
     args = parser.parse_args()
+
+    LLM_API_URL = args.llm_api_url
+    LLM_MODEL_NAME = args.llm_model_name
+
     app.run(host=args.host, port=args.port, threaded=True, debug=False)
