@@ -55,6 +55,7 @@ private:
     static std::map<DeviceID, Device> device_static_info; // static device info
 
     static std::map<DeviceID, DeviceStatus> device_status; // dynamic device info
+    static std::map<DeviceID, int> device_info_failure_count;
 
     // static std::shared_mutex td_map_mutex_; // Thread-safe mutex for TDMap
     static std::map<TaskType, std::map<DeviceID, DevSrvInfos> > tdMap;

@@ -7,14 +7,15 @@ from agent_tools import (
     DEFAULT_IMAGE_AGENT_URL,
     DEFAULT_LLM_API_URL,
     DEFAULT_LLM_MODEL_NAME,
+    DEFAULT_TEXT_AGENT_URL,
     call_llm,
     call_mcp_tool,
+    choose_user_text,
     extract_text_fields_from_form,
     get_sub_agent_profile,
     load_sub_agent_catalog,
-    choose_user_text,
-    post_multipart,
     parse_json_object,
+    post_multipart,
 )
 
 
@@ -25,15 +26,22 @@ is_blocking = False
 LLM_API_URL = DEFAULT_LLM_API_URL
 LLM_MODEL_NAME = DEFAULT_LLM_MODEL_NAME
 IMAGE_AGENT_URL = DEFAULT_IMAGE_AGENT_URL
+TEXT_AGENT_URL = DEFAULT_TEXT_AGENT_URL
+
+SUB_AGENT_ENDPOINTS = {
+    "image_agent": "/v1/sub-agents/image/execute",
+    "text_agent": "/v1/sub-agents/text/execute",
+}
+SUPPORTED_SUB_AGENTS = set(SUB_AGENT_ENDPOINTS.keys())
 
 
-def build_main_agent_messages(user_text, cluster_resources, sub_agent_catalog):
+def build_main_agent_messages(user_text, cluster_resources, sub_agent_catalog, sub_agent_name):
     return [
         {
             "role": "system",
             "content": (
                 "You are a main multi-agent scheduler.\n"
-                "Your job is to select which board should launch the image_agent, based on cluster resources and sub agent startup overhead.\n"
+                f"Your job is to select which board should launch the {sub_agent_name}, based on cluster resources and sub agent startup overhead.\n"
                 "Return JSON only with this schema:\n"
                 "{\"target_global_id\":\"<uuid>\",\"reason\":\"<short reason>\"}\n"
                 "Rules:\n"
@@ -47,11 +55,65 @@ def build_main_agent_messages(user_text, cluster_resources, sub_agent_catalog):
             "role": "user",
             "content": (
                 f"user_text:\n{user_text}\n\n"
+                f"requested_sub_agent:\n{sub_agent_name}\n\n"
                 f"cluster_resources:\n{json.dumps(cluster_resources, ensure_ascii=False)}\n\n"
                 f"sub_agent_catalog:\n{json.dumps(sub_agent_catalog, ensure_ascii=False)}"
             ),
         },
     ]
+
+
+def build_final_answer_messages(user_text, sub_agent_name, sub_agent_response):
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are the main agent that returns the final answer to the user.\n"
+                "Use the sub agent result as the source of truth.\n"
+                "Return concise natural Chinese only.\n"
+                "Do not include JSON, scheduling details, node ids, URLs, token usage, or debug fields.\n"
+                "Summarize the actual task result for the user.\n"
+                "When available, include the result, model name, and elapsed time."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"user_text:\n{user_text}\n\n"
+                f"sub_agent:\n{sub_agent_name}\n\n"
+                f"sub_agent_response:\n{json.dumps(sub_agent_response, ensure_ascii=False)}"
+            ),
+        },
+    ]
+
+
+def make_final_answer(user_text, sub_agent_name, sub_agent_response):
+    model_result = call_llm(
+        build_final_answer_messages(user_text, sub_agent_name, sub_agent_response),
+        llm_api_url=LLM_API_URL,
+        model_name=LLM_MODEL_NAME,
+    )
+    content = model_result["content"].strip()
+    if not content:
+        content = sub_agent_response.get("message", "")
+    return content, model_result
+
+
+def parse_bool_form_value(value):
+    if value is None:
+        return False
+    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def detect_requested_sub_agent(text_fields, image_file):
+    requested_sub_agent = (text_fields.get("sub_agent") or "").strip()
+    if requested_sub_agent:
+        if requested_sub_agent not in SUPPORTED_SUB_AGENTS:
+            raise RuntimeError(f"unsupported sub_agent: {requested_sub_agent}")
+        return requested_sub_agent
+    if image_file is not None and image_file.filename:
+        return "image_agent"
+    return "text_agent"
 
 
 def filter_nodes_for_sub_agent(cluster_resources, sub_agent_name):
@@ -82,12 +144,11 @@ def filter_nodes_for_sub_agent(cluster_resources, sub_agent_name):
     }
 
 
-def select_target_node_for_sub_agent(user_text, cluster_resources):
+def select_target_node_for_sub_agent(user_text, cluster_resources, sub_agent_name):
     sub_agent_catalog = load_sub_agent_catalog()
-    sub_agent_name = "image_agent"
     filtered_cluster_resources = filter_nodes_for_sub_agent(cluster_resources, sub_agent_name)
     model_result = call_llm(
-        build_main_agent_messages(user_text, filtered_cluster_resources, sub_agent_catalog),
+        build_main_agent_messages(user_text, filtered_cluster_resources, sub_agent_catalog, sub_agent_name),
         llm_api_url=LLM_API_URL,
         model_name=LLM_MODEL_NAME,
     )
@@ -126,13 +187,58 @@ def ensure_sub_agent_started(agent_name, target_global_id):
     return start_result
 
 
-def resolve_sub_agent_url(start_result):
+def resolve_sub_agent_url(agent_name, start_result):
     result = start_result.get("result", {})
     ip_address = result.get("ip_address")
     port = result.get("port")
     if ip_address and port:
-        return f"http://{ip_address}:{port}/v1/sub-agents/image/execute"
-    return IMAGE_AGENT_URL
+        endpoint = SUB_AGENT_ENDPOINTS.get(agent_name)
+        if not endpoint:
+            raise RuntimeError(f"unknown sub agent endpoint mapping: {agent_name}")
+        return f"http://{ip_address}:{port}{endpoint}"
+    if agent_name == "image_agent":
+        return IMAGE_AGENT_URL
+    if agent_name == "text_agent":
+        return TEXT_AGENT_URL
+    raise RuntimeError(f"unknown sub agent fallback url: {agent_name}")
+
+
+def invoke_sub_agent(selection, user_text, image_file):
+    sub_agent_name = selection["sub_agent"]
+    fields = {
+        "user_text": user_text,
+        "target_node": json.dumps(selection["target_node"], ensure_ascii=False),
+        "sub_agent_profile": json.dumps(get_sub_agent_profile(sub_agent_name), ensure_ascii=False),
+    }
+    files = []
+
+    if sub_agent_name == "image_agent":
+        if image_file is None or not image_file.filename:
+            raise RuntimeError("image_agent requires an uploaded image")
+        image_bytes = image_file.read()
+        files.append(
+            {
+                "field_name": "image",
+                "filename": image_file.filename or "upload.bin",
+                "content_type": image_file.content_type or "application/octet-stream",
+                "content": image_bytes,
+            }
+        )
+    elif sub_agent_name != "text_agent":
+        raise RuntimeError(f"unsupported sub agent: {sub_agent_name}")
+
+    start_result = ensure_sub_agent_started(sub_agent_name, selection["target_global_id"])
+    sub_agent_url = resolve_sub_agent_url(sub_agent_name, start_result)
+    sub_agent_response_raw = post_multipart(
+        sub_agent_url,
+        fields=fields,
+        files=files,
+        timeout=240,
+    )
+    sub_agent_response = json.loads(sub_agent_response_raw)
+    if "error" in sub_agent_response:
+        raise RuntimeError(sub_agent_response["error"].get("message", f"{sub_agent_name} returned an error"))
+    return sub_agent_response, start_result, sub_agent_url
 
 
 @app.route("/v1/multi-agent/chat", methods=["POST"])
@@ -150,19 +256,23 @@ def multi_agent_chat():
         }), 503
 
     image_file = request.files.get("image")
-    if image_file is None or not image_file.filename:
+    text_fields = extract_text_fields_from_form(request.form)
+    request_controls = dict(text_fields)
+    request_controls.pop("sub_agent", None)
+    debug_response = parse_bool_form_value(request_controls.pop("debug", None))
+    if image_file is None and not request_controls:
         return jsonify({
             "error": {
-                "message": "multipart form must include an image field named 'image'",
+                "message": "multipart form must include either an image field or a non-empty text field",
                 "type": "invalid_request_error",
-                "param": "image",
+                "param": None,
                 "code": None,
             }
         }), 400
 
-    text_fields = extract_text_fields_from_form(request.form)
     try:
-        user_text = choose_user_text(text_fields)
+        user_text = choose_user_text(request_controls)
+        sub_agent_name = detect_requested_sub_agent(text_fields, image_file)
     except RuntimeError as exc:
         return jsonify({
             "error": {
@@ -178,53 +288,47 @@ def multi_agent_chat():
         is_blocking = True
 
         cluster_resources = json.loads(call_mcp_tool("get_cluster_resources"))
-        selection = select_target_node_for_sub_agent(user_text, cluster_resources)
-        start_result = ensure_sub_agent_started(selection["sub_agent"], selection["target_global_id"])
-        image_agent_url = resolve_sub_agent_url(start_result)
-
-        image_bytes = image_file.read()
-        sub_agent_response_raw = post_multipart(
-            image_agent_url,
-            fields={
-                "user_text": user_text,
-                "target_node": json.dumps(selection["target_node"], ensure_ascii=False),
-                "sub_agent_profile": json.dumps(get_sub_agent_profile("image_agent"), ensure_ascii=False),
-            },
-            files=[{
-                "field_name": "image",
-                "filename": image_file.filename or "upload.bin",
-                "content_type": image_file.content_type or "application/octet-stream",
-                "content": image_bytes,
-            }],
-            timeout=240,
-        )
-        sub_agent_response = json.loads(sub_agent_response_raw)
-        if "error" in sub_agent_response:
-            raise RuntimeError(sub_agent_response["error"].get("message", "sub image agent returned an error"))
+        selection = select_target_node_for_sub_agent(user_text, cluster_resources, sub_agent_name)
+        sub_agent_response, start_result, sub_agent_url = invoke_sub_agent(selection, user_text, image_file)
+        final_message, final_usage = make_final_answer(user_text, sub_agent_name, sub_agent_response)
 
         main_usage = selection["_usage"]
         sub_usage = sub_agent_response.get("usage", {})
-        prompt_tokens = main_usage["prompt_tokens"] + sub_usage.get("prompt_tokens", 0)
-        completion_tokens = main_usage["completion_tokens"] + sub_usage.get("completion_tokens", 0)
+        prompt_tokens = (
+            main_usage["prompt_tokens"]
+            + sub_usage.get("prompt_tokens", 0)
+            + final_usage.get("prompt_tokens", 0)
+        )
+        completion_tokens = (
+            main_usage["completion_tokens"]
+            + sub_usage.get("completion_tokens", 0)
+            + final_usage.get("completion_tokens", 0)
+        )
 
-        return Response(json.dumps({
+        response_payload = {
             "object": "multi_agent.chat",
-            "message": sub_agent_response.get("message", ""),
-            "main_agent_selection": {
-                "sub_agent": selection["sub_agent"],
-                "target_global_id": selection["target_global_id"],
-                "reason": selection.get("reason", ""),
-                "target_node": selection["target_node"],
-            },
-            "sub_agent_startup": start_result,
-            "sub_agent_url": image_agent_url,
-            "sub_agent_result": sub_agent_response,
-            "usage": {
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-            }
-        }, ensure_ascii=False), content_type="application/json")
+            "message": final_message,
+        }
+
+        if debug_response:
+            response_payload.update({
+                "main_agent_selection": {
+                    "sub_agent": selection["sub_agent"],
+                    "target_global_id": selection["target_global_id"],
+                    "reason": selection.get("reason", ""),
+                    "target_node": selection["target_node"],
+                },
+                "sub_agent_startup": start_result,
+                "sub_agent_url": sub_agent_url,
+                "sub_agent_result": sub_agent_response,
+                "usage": {
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "total_tokens": prompt_tokens + completion_tokens,
+                },
+            })
+
+        return Response(json.dumps(response_payload, ensure_ascii=False), content_type="application/json")
     except Exception as exc:
         return jsonify({
             "error": {
@@ -246,10 +350,12 @@ if __name__ == "__main__":
     parser.add_argument("--llm_api_url", default=DEFAULT_LLM_API_URL)
     parser.add_argument("--llm_model_name", default=DEFAULT_LLM_MODEL_NAME)
     parser.add_argument("--image_agent_url", default=DEFAULT_IMAGE_AGENT_URL)
+    parser.add_argument("--text_agent_url", default=DEFAULT_TEXT_AGENT_URL)
     args = parser.parse_args()
 
     LLM_API_URL = args.llm_api_url
     LLM_MODEL_NAME = args.llm_model_name
     IMAGE_AGENT_URL = args.image_agent_url
+    TEXT_AGENT_URL = args.text_agent_url
 
     app.run(host=args.host, port=args.port, threaded=True, debug=False)

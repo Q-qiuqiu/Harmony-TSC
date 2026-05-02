@@ -6,12 +6,13 @@ from typing import Any
 from cluster_resource_tool import fetch_cluster_resources
 from start_sub_agent_tool import start_sub_agent
 from task_catalog_tool import fetch_task_catalog
-from vision_execute_tool import run_vision_task_on_node
+from vision_execute_tool import run_task_on_node, run_vision_task_on_node
 
 
 GET_CLUSTER_RESOURCES_TOOL = "get_cluster_resources"
 GET_TASK_CATALOG_TOOL = "get_task_catalog"
 RUN_VISION_TASK_ON_NODE_TOOL = "run_vision_task_on_node"
+RUN_TASK_ON_NODE_TOOL = "run_task_on_node"
 START_SUB_AGENT_TOOL = "start_sub_agent"
 
 
@@ -99,6 +100,31 @@ def handle_tools_list(request_id: Any) -> dict[str, Any]:
                     },
                 },
                 {
+                    "name": RUN_TASK_ON_NODE_TOOL,
+                    "description": "Run a task on a specific board selected by the model. The gateway will create or reuse the target container on that board and forward a multipart file request.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "task_type": {
+                                "type": "string",
+                                "enum": ["Bert", "MobileNet", "ResNet50", "YoloV5", "deeplabv3"],
+                            },
+                            "target_global_id": {"type": "string"},
+                            "input_path": {"type": "string"},
+                            "input_b64": {"type": "string"},
+                            "input_name": {"type": "string"},
+                            "form_fields": {
+                                "type": "object",
+                                "additionalProperties": {"type": "string"},
+                            },
+                            "real_url": {"type": "string", "default": "predict"},
+                            "file_field_name": {"type": "string", "default": "file"},
+                        },
+                        "required": ["task_type", "target_global_id"],
+                        "additionalProperties": False,
+                    },
+                },
+                {
                     "name": RUN_VISION_TASK_ON_NODE_TOOL,
                     "description": "Run a vision task on a specific board selected by the model. The gateway will create or reuse the target container on that board and forward the image inference request.",
                     "inputSchema": {
@@ -135,6 +161,8 @@ def handle_tools_call(request_id: Any, params: dict[str, Any]) -> dict[str, Any]
             return tool_response_text(fetch_task_catalog(arguments.get("available_device_types")), request_id)
         if name == START_SUB_AGENT_TOOL:
             return tool_response_text(start_sub_agent(arguments), request_id)
+        if name == RUN_TASK_ON_NODE_TOOL:
+            return tool_response_text(run_task_on_node(arguments), request_id)
         if name == RUN_VISION_TASK_ON_NODE_TOOL:
             return tool_response_text(run_vision_task_on_node(arguments), request_id)
         return make_error(request_id, -32602, f"unknown tool: {name}")

@@ -19,6 +19,8 @@ constexpr auto kServiceReadyTimeout = std::chrono::seconds(20);
 constexpr int kDefaultSubAgentStartupTimeoutSec = 20;
 constexpr auto kServiceReadyPollInterval = std::chrono::milliseconds(200);
 constexpr auto kServiceReadyConnectTimeout = std::chrono::milliseconds(200);
+constexpr auto kExistingSubAgentProbeTimeout = std::chrono::seconds(2);
+constexpr int kMaxDeviceInfoFailureCount = 3;
 
 struct SubAgentRuntimeConfig {
     CreateContainerParam create_param;
@@ -150,6 +152,7 @@ std::shared_mutex Docker_scheduler::devs_mutex; //
 std::map<DeviceID, Device> Docker_scheduler::device_static_info; // static device info
 
 std::map<DeviceID, DeviceStatus> Docker_scheduler::device_status; // dynamic device info
+std::map<DeviceID, int> Docker_scheduler::device_info_failure_count;
 
 // std::shared_mutex Docker_scheduler::td_map_mutex_; // Thread-safe mutex for TDMap
 std::map<TaskType, std::map<DeviceID, DevSrvInfos> > Docker_scheduler::tdMap;
@@ -251,6 +254,7 @@ int Docker_scheduler::RegisNode(const Device &device) {
     device_static_info[device.global_id] = device;
     // update dev_status
     device_status[device.global_id] = DeviceStatus();
+    device_info_failure_count[device.global_id] = 0;
 
     // update Tdmap all tasktype add new device
     // according to task_static_info, match supported tasktype and device
@@ -325,6 +329,9 @@ void Docker_scheduler::RemoveDevice(DeviceID global_id) {
         auto it = tdMap[ttype].find(global_id);
         tdMap[ttype].erase(it);
     }
+    device_static_info.erase(global_id);
+    device_status.erase(global_id);
+    device_info_failure_count.erase(global_id);
 }
 
 bool Docker_scheduler::HotStartAllNodeByTType(TaskType ttype) {
@@ -350,7 +357,9 @@ void Docker_scheduler::startDeviceInfoCollection() {
         while (true) {
             {
                 std::unique_lock<std::shared_mutex> lock(devs_mutex);
+                std::vector<DeviceID> disconnected_devices;
                 for (auto [k, dev]: device_static_info) {
+                    bool collect_success = false;
                     // start new Thread to collect
                     httplib::Client cli(dev.ip_address, dev.agent_port);
                     httplib::Result res;
@@ -366,11 +375,13 @@ void Docker_scheduler::startDeviceInfoCollection() {
                                 spdlog::error(
                                         "Failed to get device info, agent return filed,dev.ip_address:{}, dev.agent_port:{}",
                                         dev.ip_address, dev.agent_port);
-                                continue;
+                            } else {
+                                DeviceStatus status;
+                                status.from_json(j["result"]);
+                                device_status[k] = status;
+                                device_info_failure_count[k] = 0;
+                                collect_success = true;
                             }
-                            DeviceStatus status;
-                            status.from_json(j["result"]);
-                            device_status[k] = status;
 //                            spdlog::info("success to get device info, dev.ip_address:{}, dev.agent_port:{}, "
 //                                         "status.mem_used:{}"
 //                                         "status.cpu_used:{}"
@@ -386,9 +397,27 @@ void Docker_scheduler::startDeviceInfoCollection() {
                                           dev.ip_address, dev.agent_port);
                         }
                     } catch (const std::exception &e) {
-                        std::cerr << "collect info error: " << e.what() << std::endl;
-                        continue;
+                        spdlog::error("Failed to get device info, dev.ip_address:{}, dev.agent_port:{}, error:{}",
+                                      dev.ip_address, dev.agent_port, e.what());
                     }
+
+                    if (!collect_success) {
+                        int &failure_count = device_info_failure_count[k];
+                        failure_count++;
+                        if (failure_count >= kMaxDeviceInfoFailureCount) {
+                            spdlog::error(
+                                    "Device disconnected after {} consecutive device_info failures, remove node, global_id:{}, ip:{}, agent_port:{}",
+                                    failure_count,
+                                    boost::uuids::to_string(k),
+                                    dev.ip_address,
+                                    dev.agent_port);
+                            disconnected_devices.push_back(k);
+                        }
+                    }
+                }
+
+                for (const auto &device_id: disconnected_devices) {
+                    RemoveDevice(device_id);
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -636,12 +665,13 @@ json Docker_scheduler::getClusterResources() {
 
         nodes.push_back(node);
     }
-
+    spdlog::info("Finished fetching cluster resources");
     return nodes;
 }
 
 std::optional<SrvInfo> Docker_scheduler::startSubAgentOnDevice(const std::string &agent_name, const DeviceID &device_id) {
     auto device_opt = getDeviceById(device_id);
+   
     if (!device_opt.has_value()) {
         spdlog::error("No such device when starting sub agent:{}, device_id:{}", agent_name, boost::uuids::to_string(device_id));
         return std::nullopt;
@@ -659,25 +689,31 @@ std::optional<SrvInfo> Docker_scheduler::startSubAgentOnDevice(const std::string
     string docker_version = GetDockerVersion(dev);
     DockerClient docker_client(dev.ip_address, 2375, docker_version);
 
-    if (WaitForServicePort(dev.ip_address, cparam.host_port, startup_timeout)) {
-        spdlog::info("sub agent already reachable, agent_name:{}, ip:{}, port:{}", agent_name, dev.ip_address, cparam.host_port);
+    spdlog::info("Searching for existing sub agent, agent_name:{}, ip:{}, port:{}, probe_timeout_sec:{}",
+                 agent_name, dev.ip_address, cparam.host_port, kExistingSubAgentProbeTimeout.count());
+    if (WaitForServicePort(dev.ip_address, cparam.host_port, kExistingSubAgentProbeTimeout)) {
+        spdlog::info("Sub agent already reachable, agent_name:{}, ip:{}, port:{}", agent_name, dev.ip_address, cparam.host_port);
         return SrvInfo{"", dev.ip_address, cparam.host_port};
     }
 
+    spdlog::info("Creating or starting container, agent_name:{}, container_name:{}, image:{}",
+                 agent_name, cparam.container_name, cparam.image);
     string container_id = docker_client.CreateContainer(cparam);
     if (!container_id.empty()) {
-        spdlog::info("sub agent container created, agent_name:{}, container_id:{}", agent_name, container_id);
+        spdlog::info("Starting newly created sub agent container, agent_name:{}, container_id:{}", agent_name, container_id);
         if (!docker_client.StartContainer(container_id)) {
-            spdlog::error("failed to start newly created sub agent container, agent_name:{}, container_id:{}", agent_name, container_id);
+            spdlog::error("Failed to start newly created sub agent container, agent_name:{}, container_id:{}", agent_name, container_id);
             return std::nullopt;
         }
     } else {
-        spdlog::info("sub agent container may already exist, try to start by name, agent_name:{}, container_name:{}", agent_name, cparam.container_name);
+        spdlog::info("Sub agent container already exist, try to start by name, agent_name:{}, container_name:{}", agent_name, cparam.container_name);
         docker_client.StartContainer(cparam.container_name);
     }
 
+    spdlog::info("Waiting for sub agent initializing, agent_name:{}, ip:{}, port:{}, timeout_sec:{}",
+                 agent_name, dev.ip_address, cparam.host_port, runtime_config.startup_timeout_sec);
     if (!WaitForServicePort(dev.ip_address, cparam.host_port, startup_timeout)) {
-        spdlog::error("sub agent port not ready after startup, agent_name:{}, ip:{}, port:{}, timeout_sec:{}",
+        spdlog::error("Sub agent port not ready after startup, agent_name:{}, ip:{}, port:{}, timeout_sec:{}",
                       agent_name, dev.ip_address, cparam.host_port, runtime_config.startup_timeout_sec);
         return std::nullopt;
     }
@@ -919,4 +955,3 @@ int Docker_scheduler::encodePlatform(DeviceType dtype) {
         default: throw std::invalid_argument("Unknown DeviceType");
     }
 }
-

@@ -48,6 +48,38 @@ def encode_multipart_formdata_from_bytes(file_field_name: str, filename: str, fi
     return bytes(body), f"multipart/form-data; boundary={boundary}"
 
 
+def encode_multipart_formdata_with_fields(
+    fields: dict[str, str],
+    file_field_name: str | None = None,
+    filename: str | None = None,
+    file_bytes: bytes | None = None,
+) -> tuple[bytes, str]:
+    boundary = f"----edge-cluster-{uuid.uuid4().hex}"
+    body = bytearray()
+
+    for key, value in fields.items():
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode("utf-8"))
+        body.extend(str(value).encode("utf-8"))
+        body.extend(b"\r\n")
+
+    if file_field_name is not None and filename is not None and file_bytes is not None:
+        content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        body.extend(
+            (
+                f'Content-Disposition: form-data; name="{file_field_name}"; '
+                f'filename="{filename}"\r\n'
+            ).encode("utf-8")
+        )
+        body.extend(f"Content-Type: {content_type}\r\n\r\n".encode("utf-8"))
+        body.extend(file_bytes)
+        body.extend(b"\r\n")
+
+    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+    return bytes(body), f"multipart/form-data; boundary={boundary}"
+
+
 def encode_multipart_formdata(file_field_name: str, file_path: str) -> tuple[bytes, str]:
     filename = os.path.basename(file_path)
     with open(file_path, "rb") as file_obj:
@@ -55,25 +87,28 @@ def encode_multipart_formdata(file_field_name: str, file_path: str) -> tuple[byt
     return encode_multipart_formdata_from_bytes(file_field_name, filename, file_bytes)
 
 
-def run_vision_task_on_node(arguments: dict[str, Any]) -> dict[str, Any]:
+def run_task_on_node(arguments: dict[str, Any]) -> dict[str, Any]:
     task_type = arguments.get("task_type")
     target_global_id = arguments.get("target_global_id")
-    image_path = arguments.get("image_path")
-    image_b64 = arguments.get("image_b64")
-    image_name = arguments.get("image_name", "upload.bin")
+    input_path = arguments.get("input_path")
+    input_b64 = arguments.get("input_b64")
+    input_name = arguments.get("input_name", "upload.bin")
     real_url = arguments.get("real_url", "predict")
-    file_field_name = arguments.get("file_field_name", "image")
+    file_field_name = arguments.get("file_field_name", "file")
+    form_fields = arguments.get("form_fields", {})
 
     if task_type not in TASK_TYPE_TO_TASK_ID:
         raise RuntimeError(f"unsupported task_type: {task_type}")
     if not target_global_id:
         raise RuntimeError("target_global_id is required")
-    if image_b64:
-        image_path = None
-    if not image_path and not image_b64:
-        raise RuntimeError("image_path or image_b64 is required")
-    if image_path and not os.path.exists(image_path):
-        raise RuntimeError(f"image_path does not exist: {image_path}")
+    if form_fields and not isinstance(form_fields, dict):
+        raise RuntimeError("form_fields must be an object when provided")
+    if input_b64:
+        input_path = None
+    if not input_path and not input_b64 and not form_fields:
+        raise RuntimeError("input_path, input_b64, or form_fields is required")
+    if input_path and not os.path.exists(input_path):
+        raise RuntimeError(f"input_path does not exist: {input_path}")
 
     path = os.environ.get("GATEWAY_QUEST_ON_NODE_PATH", "/quest_on_node")
     query = urllib.parse.urlencode(
@@ -85,14 +120,29 @@ def run_vision_task_on_node(arguments: dict[str, Any]) -> dict[str, Any]:
     )
     url = f"{_gateway_url(path)}?{query}"
 
-    if image_b64:
+    if input_b64:
         try:
-            image_bytes = base64.b64decode(image_b64)
+            input_bytes = base64.b64decode(input_b64)
         except Exception as exc:
-            raise RuntimeError(f"invalid image_b64: {exc}") from exc
-        body, content_type = encode_multipart_formdata_from_bytes(file_field_name, image_name, image_bytes)
+            raise RuntimeError(f"invalid input_b64: {exc}") from exc
+        body, content_type = encode_multipart_formdata_with_fields(
+            {str(key): str(value) for key, value in form_fields.items()},
+            file_field_name=file_field_name,
+            filename=input_name,
+            file_bytes=input_bytes,
+        )
     else:
-        body, content_type = encode_multipart_formdata(file_field_name, image_path)
+        if input_path:
+            body, content_type = encode_multipart_formdata_with_fields(
+                {str(key): str(value) for key, value in form_fields.items()},
+                file_field_name=file_field_name,
+                filename=os.path.basename(input_path),
+                file_bytes=open(input_path, "rb").read(),
+            )
+        else:
+            body, content_type = encode_multipart_formdata_with_fields(
+                {str(key): str(value) for key, value in form_fields.items()}
+            )
     request = urllib.request.Request(url, data=body, method="POST")
     request.add_header("Content-Type", content_type)
     request.add_header("Content-Length", str(len(body)))
@@ -110,3 +160,17 @@ def run_vision_task_on_node(arguments: dict[str, Any]) -> dict[str, Any]:
         return json.loads(response_body)
     except json.JSONDecodeError as exc:
         raise RuntimeError(f"gateway returned invalid JSON: {exc}") from exc
+
+
+def run_vision_task_on_node(arguments: dict[str, Any]) -> dict[str, Any]:
+    return run_task_on_node(
+        {
+            "task_type": arguments.get("task_type"),
+            "target_global_id": arguments.get("target_global_id"),
+            "input_path": arguments.get("image_path"),
+            "input_b64": arguments.get("image_b64"),
+            "input_name": arguments.get("image_name", "upload.bin"),
+            "real_url": arguments.get("real_url", "predict"),
+            "file_field_name": arguments.get("file_field_name", "image"),
+        }
+    )

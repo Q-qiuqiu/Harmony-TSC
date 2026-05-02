@@ -239,7 +239,7 @@ void HttpServer::HandleHotStart(const httplib::Request &req, httplib::Response &
 
 void HttpServer::HandleClusterResources(const httplib::Request &req, httplib::Response &res) {
     (void) req;
-    spdlog::info("Fetched cluster resources");
+    spdlog::info("Fetch cluster resources");
     json response;
     response["status"] = "success";
     response["result"] = Docker_scheduler::getClusterResources();
@@ -251,7 +251,7 @@ void HttpServer::HandleClusterResources(const httplib::Request &req, httplib::Re
 void HttpServer::HandleStartSubAgent(const httplib::Request &req, httplib::Response &res) {
     auto agent_name = req.get_param_value("agent_name");
     auto target_global_id_str = req.get_param_value("target_global_id");
-
+    spdlog::info("Starting the sub agent: {}", agent_name);
     if (agent_name.empty() || target_global_id_str.empty()) {
         res.status = 400;
         res.set_content("Missing agent_name or target_global_id parameter", "text/plain");
