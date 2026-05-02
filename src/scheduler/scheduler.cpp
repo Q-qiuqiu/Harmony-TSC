@@ -325,9 +325,12 @@ void Docker_scheduler::loadStaticInfo(string filepath) {
 }
 
 void Docker_scheduler::RemoveDevice(DeviceID global_id) {
-    for (auto [ttype, v]: tdMap) {
-        auto it = tdMap[ttype].find(global_id);
-        tdMap[ttype].erase(it);
+    for (auto &[ttype, dev_srv_infos_by_device]: tdMap) {
+        auto it = dev_srv_infos_by_device.find(global_id);
+        if (it != dev_srv_infos_by_device.end()) {
+            it->second.timer_callback.stop();
+            dev_srv_infos_by_device.erase(it);
+        }
     }
     device_static_info.erase(global_id);
     device_status.erase(global_id);

@@ -25,6 +25,22 @@ public:
           elapsed_time(0), once_flag(once_flag) {
     }
 
+    ~TimerCallback() {
+        stop();
+    }
+
+    void stop() {
+        stop_flag = true;
+        if (!timer_thread.joinable()) {
+            return;
+        }
+        if (timer_thread.get_id() == std::this_thread::get_id()) {
+            timer_thread.detach();
+            return;
+        }
+        timer_thread.join();
+    }
+
     void set_callback(std::function<void()> callback1) {
         this->callback = callback1;
     }
@@ -39,10 +55,7 @@ public:
 
     // Start the timer by creating a new thread
     void start() {
-        if (timer_thread.joinable()) {
-            stop_flag = true;
-            timer_thread.join(); // ensure previous thread teminate
-        }
+        stop();
         stop_flag = false; // Ensure stop_flag is false before starting the timer
         elapsed_time = 0; // Reset the elapsed time
         timer_thread = std::thread(&TimerCallback::run, this); // Start the timer thread
