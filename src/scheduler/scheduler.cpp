@@ -8,6 +8,8 @@
 #include <filesystem>
 #include <DockerClient.h>
 #include <random>
+#include <memory>
+#include <unordered_map>
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -21,7 +23,10 @@ constexpr auto kServiceReadyPollInterval = std::chrono::milliseconds(200);
 constexpr auto kServiceReadyConnectTimeout = std::chrono::milliseconds(200);
 constexpr auto kExistingSubAgentProbeTimeout = std::chrono::seconds(2);
 constexpr auto kTaskServiceStartupTimeout = std::chrono::seconds(180);
+constexpr int kSubAgentIdleTimeoutSec = 300;
 constexpr int kMaxDeviceInfoFailureCount = 3;
+std::mutex g_sub_agent_idle_timer_mutex;
+std::unordered_map<std::string, std::shared_ptr<TimerCallback>> g_sub_agent_idle_timers;
 
 struct SubAgentRuntimeConfig {
     CreateContainerParam create_param;
@@ -140,6 +145,71 @@ std::optional<std::string> ResolveLocalIpForTarget(const std::string &target_ip,
     }
 
     return std::string(ip_str);
+}
+
+std::string BuildSubAgentTimerKey(const std::string &agent_name, const DeviceID &device_id) {
+    return boost::uuids::to_string(device_id) + "|" + agent_name;
+}
+
+void ArmOrRefreshSubAgentIdleTimer(const std::string &agent_name, const Device &dev, const std::string &container_name) {
+    const std::string key = BuildSubAgentTimerKey(agent_name, dev.global_id);
+    {
+        std::lock_guard<std::mutex> lock(g_sub_agent_idle_timer_mutex);
+        auto it = g_sub_agent_idle_timers.find(key);
+        if (it != g_sub_agent_idle_timers.end()) {
+            it->second->refresh();
+            spdlog::info("Refreshed sub agent idle timer, key:{}, timeout_sec:{}", key, kSubAgentIdleTimeoutSec);
+            return;
+        }
+    }
+
+    auto timer = std::make_shared<TimerCallback>();
+    timer->set_interval(kSubAgentIdleTimeoutSec);
+    timer->set_once_flag(true);
+    timer->set_callback([agent_name, dev, container_name, key]() {
+        string docker_version = GetDockerVersion(dev);
+        DockerClient docker_client(dev.ip_address, 2375, docker_version);
+        bool delete_volume = false;
+        bool force = true;
+        bool delete_link_container = false;
+        bool removed = docker_client.RemoveContainer(container_name, delete_volume, force, delete_link_container);
+        if (removed) {
+            spdlog::info("Removed idle sub agent container, key:{}, container_name:{}, ip:{}",
+                         key, container_name, dev.ip_address);
+        } else {
+            spdlog::warn("Failed to remove idle sub agent container, key:{}, container_name:{}, ip:{}",
+                         key, container_name, dev.ip_address);
+        }
+        std::lock_guard<std::mutex> lock(g_sub_agent_idle_timer_mutex);
+        g_sub_agent_idle_timers.erase(key);
+    });
+
+    {
+        std::lock_guard<std::mutex> lock(g_sub_agent_idle_timer_mutex);
+        g_sub_agent_idle_timers[key] = timer;
+    }
+    timer->start();
+    spdlog::info("Started sub agent idle timer, key:{}, timeout_sec:{}", key, kSubAgentIdleTimeoutSec);
+}
+
+void RemoveSubAgentIdleTimersForDevice(const DeviceID &device_id) {
+    const std::string prefix = boost::uuids::to_string(device_id) + "|";
+    std::vector<std::string> keys;
+    {
+        std::lock_guard<std::mutex> lock(g_sub_agent_idle_timer_mutex);
+        for (const auto &[key, timer]: g_sub_agent_idle_timers) {
+            if (key.rfind(prefix, 0) == 0) {
+                keys.push_back(key);
+            }
+        }
+        for (const auto &key: keys) {
+            auto it = g_sub_agent_idle_timers.find(key);
+            if (it != g_sub_agent_idle_timers.end()) {
+                it->second->stop();
+                g_sub_agent_idle_timers.erase(it);
+            }
+        }
+    }
 }
 
 std::optional<SubAgentRuntimeConfig> LoadSubAgentRuntimeConfig(const std::string &agent_name, DeviceType device_type) {
@@ -383,6 +453,7 @@ void Docker_scheduler::RemoveDevice(DeviceID global_id) {
     device_static_info.erase(global_id);
     device_status.erase(global_id);
     device_info_failure_count.erase(global_id);
+    RemoveSubAgentIdleTimersForDevice(global_id);
 }
 
 bool Docker_scheduler::HotStartAllNodeByTType(TaskType ttype) {
@@ -781,6 +852,7 @@ std::optional<SrvInfo> Docker_scheduler::startSubAgentOnDevice(const std::string
                  agent_name, dev.ip_address, cparam.host_port, kExistingSubAgentProbeTimeout.count());
     if (WaitForServicePort(dev.ip_address, cparam.host_port, kExistingSubAgentProbeTimeout)) {
         spdlog::info("Sub agent already reachable, agent_name:{}, ip:{}, port:{}", agent_name, dev.ip_address, cparam.host_port);
+        ArmOrRefreshSubAgentIdleTimer(agent_name, dev, cparam.container_name);
         return SrvInfo{"", dev.ip_address, cparam.host_port};
     }
 
@@ -806,6 +878,7 @@ std::optional<SrvInfo> Docker_scheduler::startSubAgentOnDevice(const std::string
         return std::nullopt;
     }
 
+    ArmOrRefreshSubAgentIdleTimer(agent_name, dev, cparam.container_name);
     return SrvInfo{"", dev.ip_address, cparam.host_port};
 }
 
