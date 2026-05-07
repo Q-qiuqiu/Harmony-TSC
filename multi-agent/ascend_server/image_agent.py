@@ -54,10 +54,11 @@ def build_model_selection_messages(user_text, image_name, target_node, task_cata
                 "{\"task_type\":\"YoloV5\",\"target_global_id\":\"<uuid>\",\"reason\":\"<short reason>\"}\n"
                 "Rules:\n"
                 "1. task_type and target_global_id must be chosen from the provided execution candidates.\n"
-                "2. For generic multi-object detection requests, YoloV5 is usually appropriate.\n"
-                "3. For lightweight classification-style requests where speed is critical, MobileNet or ResNet50 may be more suitable.\n"
-                "4. Prefer lower expected overhead when it still satisfies the task intent.\n"
-                "5. Never output anything except a single JSON object."
+                "2. YoloV5 is mainly for object detection and bounding box coordinates, not for image classification.\n"
+                "3. MobileNet and ResNet50 are for image classification.\n"
+                "4. For classification requests, prefer MobileNet when speed is important; use ResNet50 when accuracy is preferred over speed.\n"
+                "5. Prefer lower expected overhead when it still satisfies the task intent.\n"
+                "6. Never output anything except a single JSON object."
             ),
         },
         {
