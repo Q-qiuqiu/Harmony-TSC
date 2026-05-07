@@ -38,7 +38,61 @@ SUB_AGENT_ENDPOINTS = {
 SUPPORTED_SUB_AGENTS = set(SUB_AGENT_ENDPOINTS.keys())
 
 
+def compact_sub_agent_catalog_for_selection(sub_agent_catalog):
+    compact_catalog = {}
+    for name, profile in sub_agent_catalog.items():
+        if not isinstance(profile, dict):
+            continue
+        runtime = profile.get("runtime", {})
+        if not isinstance(runtime, dict):
+            runtime = {}
+        compact_catalog[name] = {
+            "supported_device_types": sorted(runtime.keys()),
+            "supports_image_input": name in {"image_agent", "segmentation_agent"},
+            "supports_text_input": True,
+        }
+    return compact_catalog
+
+
+def compact_sub_agent_catalog_for_scheduling(sub_agent_catalog, sub_agent_name):
+    profile = sub_agent_catalog.get(sub_agent_name, {})
+    runtime = profile.get("runtime", {}) if isinstance(profile, dict) else {}
+    compact_runtime = {}
+    if isinstance(runtime, dict):
+        for device_type, runtime_info in runtime.items():
+            if not isinstance(runtime_info, dict):
+                continue
+            compact_runtime[device_type] = {
+                "startup_timeout_sec": runtime_info.get("startup_timeout_sec"),
+            }
+    return {
+        sub_agent_name: {
+            "runtime": compact_runtime,
+        }
+    }
+
+
+def compact_cluster_resources_for_scheduling(cluster_resources):
+    compact_nodes = []
+    for node in cluster_resources.get("result", []):
+        if not isinstance(node, dict):
+            continue
+        compact_nodes.append(
+            {
+                "global_id": node.get("global_id"),
+                "ip_address": node.get("ip_address"),
+                "type": node.get("type"),
+                "resource": node.get("resource", {}),
+            }
+        )
+    return {
+        "status": cluster_resources.get("status", "success"),
+        "result": compact_nodes,
+    }
+
+
 def build_sub_agent_selection_messages(user_text, has_image, sub_agent_catalog):
+    compact_catalog = compact_sub_agent_catalog_for_selection(sub_agent_catalog)
     return [
         {
             "role": "system",
@@ -61,13 +115,15 @@ def build_sub_agent_selection_messages(user_text, has_image, sub_agent_catalog):
             "content": (
                 f"user_text:\n{user_text}\n\n"
                 f"has_image:\n{json.dumps(has_image)}\n\n"
-                f"sub_agent_catalog:\n{json.dumps(sub_agent_catalog, ensure_ascii=False)}"
+                f"sub_agent_catalog:\n{json.dumps(compact_catalog, ensure_ascii=False)}"
             ),
         },
     ]
 
 
 def build_main_agent_messages(user_text, cluster_resources, sub_agent_catalog, sub_agent_name):
+    compact_cluster_resources = compact_cluster_resources_for_scheduling(cluster_resources)
+    compact_sub_agent_catalog = compact_sub_agent_catalog_for_scheduling(sub_agent_catalog, sub_agent_name)
     return [
         {
             "role": "system",
@@ -88,8 +144,8 @@ def build_main_agent_messages(user_text, cluster_resources, sub_agent_catalog, s
             "content": (
                 f"user_text:\n{user_text}\n\n"
                 f"requested_sub_agent:\n{sub_agent_name}\n\n"
-                f"cluster_resources:\n{json.dumps(cluster_resources, ensure_ascii=False)}\n\n"
-                f"sub_agent_catalog:\n{json.dumps(sub_agent_catalog, ensure_ascii=False)}"
+                f"cluster_resources:\n{json.dumps(compact_cluster_resources, ensure_ascii=False)}\n\n"
+                f"sub_agent_catalog:\n{json.dumps(compact_sub_agent_catalog, ensure_ascii=False)}"
             ),
         },
     ]
@@ -97,6 +153,13 @@ def build_main_agent_messages(user_text, cluster_resources, sub_agent_catalog, s
 
 def build_final_answer_messages(user_text, sub_agent_name, sub_agent_response):
     summarized_response = redact_large_binary_fields(sub_agent_response)
+    compact_response = {
+        "object": summarized_response.get("object"),
+        "message": summarized_response.get("message"),
+        "selected_execution": summarized_response.get("selected_execution"),
+        "tool_result": summarized_response.get("tool_result"),
+        "result_image": "<present>" if summarized_response.get("result_image") else None,
+    }
     return [
         {
             "role": "system",
@@ -114,7 +177,7 @@ def build_final_answer_messages(user_text, sub_agent_name, sub_agent_response):
             "content": (
                 f"user_text:\n{user_text}\n\n"
                 f"sub_agent:\n{sub_agent_name}\n\n"
-                f"sub_agent_response:\n{json.dumps(summarized_response, ensure_ascii=False)}"
+                f"sub_agent_response:\n{json.dumps(compact_response, ensure_ascii=False)}"
             ),
         },
     ]

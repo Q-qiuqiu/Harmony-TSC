@@ -39,7 +39,7 @@ def start_sub_agent(arguments: dict[str, Any]) -> dict[str, Any]:
     request.add_header("Content-Length", "0")
 
     try:
-        with urllib.request.urlopen(request, timeout=120) as response:
+        with urllib.request.urlopen(request, timeout=300) as response:
             response_body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")

@@ -21,8 +21,24 @@ LLM_API_URL = DEFAULT_LLM_API_URL
 LLM_MODEL_NAME = DEFAULT_LLM_MODEL_NAME
 
 
+def compact_sub_agent_profile(sub_agent_profile):
+    tools = sub_agent_profile.get("tools", {})
+    compact_tools = []
+    for tool_name, tool_info in tools.items():
+        if not isinstance(tool_info, dict):
+            continue
+        compact_tools.append(
+            {
+                "tool": tool_name,
+                "task_type": tool_info.get("task_type"),
+                "capabilities": tool_info.get("capabilities", []),
+            }
+        )
+    return {"tools": compact_tools}
+
+
 def build_model_selection_messages(user_text, image_name, target_node, task_catalog, sub_agent_profile):
-    profile_json = json.dumps(sub_agent_profile, ensure_ascii=False)
+    profile_json = json.dumps(compact_sub_agent_profile(sub_agent_profile), ensure_ascii=False)
     return [
         {
             "role": "system",
@@ -92,21 +108,28 @@ def build_execution_candidates(cluster_resources, task_catalog, sub_agent_profil
     candidates = []
     for node in nodes:
         node_type = node.get("type")
+        models = []
         for item in task_catalog.get("result", []):
             if not isinstance(item, dict):
                 continue
             task_type = item.get("task_type")
             if item.get("device_type") != node_type or task_type not in supported_task_types:
                 continue
+            models.append(
+                {
+                    "task_type": task_type,
+                    "model_name": item.get("model_name"),
+                    "overhead": item.get("overhead"),
+                }
+            )
+        if models:
             candidates.append(
                 {
                     "target_global_id": node.get("global_id"),
                     "ip_address": node.get("ip_address"),
                     "device_type": node_type,
                     "resource": node.get("resource"),
-                    "task_type": task_type,
-                    "model_name": item.get("model_name"),
-                    "overhead": item.get("overhead"),
+                    "models": models,
                 }
             )
     if not candidates:
@@ -127,13 +150,22 @@ def choose_execution_target(user_text, image_name, target_node, execution_candid
         raise RuntimeError("sub image agent selection missing task_type or target_global_id")
 
     matched_candidate = None
-    for item in execution_candidates.get("result", []):
-        if (
-            isinstance(item, dict)
-            and item.get("task_type") == task_type
-            and item.get("target_global_id") == target_global_id
-        ):
-            matched_candidate = item
+    for node_item in execution_candidates.get("result", []):
+        if not isinstance(node_item, dict) or node_item.get("target_global_id") != target_global_id:
+            continue
+        for model_item in node_item.get("models", []):
+            if isinstance(model_item, dict) and model_item.get("task_type") == task_type:
+                matched_candidate = {
+                    "target_global_id": node_item.get("target_global_id"),
+                    "ip_address": node_item.get("ip_address"),
+                    "device_type": node_item.get("device_type"),
+                    "resource": node_item.get("resource"),
+                    "task_type": model_item.get("task_type"),
+                    "model_name": model_item.get("model_name"),
+                    "overhead": model_item.get("overhead"),
+                }
+                break
+        if matched_candidate is not None:
             break
     if matched_candidate is None:
         raise RuntimeError(

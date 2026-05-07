@@ -57,7 +57,7 @@
           "startup_timeout_sec": 60,
           "cmds": [
             "bash",
-            "/workspace/multi-agent/server/image_agent.sh"
+            "/workspace/multi-agent/rk_server/image_agent.sh"
           ],
           "args": [],
           "host_config_privileged": true,
@@ -85,7 +85,7 @@
         "ATLAS_H": {
           "container_name": "image_agent_qwen_ascend_atlas_h",
           "image": "qwen-openai-server:orangepi",
-          "startup_timeout_sec": 300,
+          "startup_timeout_sec": 60,
           "cmds": [
             "bash",
             "/workspace/multi-agent/ascend_server/image_agent.sh"
@@ -206,7 +206,7 @@
           "startup_timeout_sec": 180,
           "cmds": [
             "bash",
-            "/workspace/multi-agent/server/text_agent.sh"
+            "/workspace/multi-agent/rk_server/text_agent.sh"
           ],
           "args": [],
           "host_config_privileged": true,
@@ -233,7 +233,7 @@
         "ATLAS_H": {
           "container_name": "text_agent_qwen_ascend_atlas_h",
           "image": "qwen-openai-server:orangepi",
-          "startup_timeout_sec": 300,
+          "startup_timeout_sec": 60,
           "cmds": [
             "bash",
             "/workspace/multi-agent/ascend_server/text_agent.sh"
@@ -354,7 +354,7 @@
           "startup_timeout_sec": 180,
           "cmds": [
             "bash",
-            "/workspace/multi-agent/server/segmentation_agent.sh"
+            "/workspace/multi-agent/rk_server/segmentation_agent.sh"
           ],
           "args": [],
           "host_config_privileged": true,
@@ -381,7 +381,7 @@
         "ATLAS_H": {
           "container_name": "segmentation_agent_qwen_ascend_atlas_h",
           "image": "qwen-openai-server:orangepi",
-          "startup_timeout_sec": 300,
+          "startup_timeout_sec": 60,
           "cmds": [
             "bash",
             "/workspace/multi-agent/ascend_server/segmentation_agent.sh"

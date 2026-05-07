@@ -22,6 +22,22 @@ LLM_MODEL_NAME = DEFAULT_LLM_MODEL_NAME
 SEGMENTATION_TASK_TYPE = "deeplabv3"
 
 
+def compact_sub_agent_profile(sub_agent_profile):
+    tools = sub_agent_profile.get("tools", {})
+    compact_tools = []
+    for tool_name, tool_info in tools.items():
+        if not isinstance(tool_info, dict):
+            continue
+        compact_tools.append(
+            {
+                "tool": tool_name,
+                "task_type": tool_info.get("task_type"),
+                "capabilities": tool_info.get("capabilities", []),
+            }
+        )
+    return {"tools": compact_tools}
+
+
 def build_execution_candidates(cluster_resources, task_catalog, sub_agent_profile):
     tools = sub_agent_profile.get("tools", {})
     supported_task_types = {
@@ -42,7 +58,6 @@ def build_execution_candidates(cluster_resources, task_catalog, sub_agent_profil
                 continue
             candidates.append({
                 "target_global_id": node.get("global_id"),
-                "ip_address": node.get("ip_address"),
                 "device_type": node_type,
                 "resource": node.get("resource"),
                 "task_type": task_type,
@@ -55,6 +70,7 @@ def build_execution_candidates(cluster_resources, task_catalog, sub_agent_profil
 
 
 def build_execution_selection_messages(user_text, image_name, execution_candidates, sub_agent_profile):
+    compact_profile = compact_sub_agent_profile(sub_agent_profile)
     return [
         {
             "role": "system",
@@ -75,7 +91,7 @@ def build_execution_selection_messages(user_text, image_name, execution_candidat
             "content": (
                 f"user_text:\n{user_text}\n\n"
                 f"image_name:\n{image_name}\n\n"
-                f"sub_agent_profile:\n{json.dumps(sub_agent_profile, ensure_ascii=False)}\n\n"
+                f"sub_agent_profile:\n{json.dumps(compact_profile, ensure_ascii=False)}\n\n"
                 f"execution_candidates:\n{json.dumps(execution_candidates, ensure_ascii=False)}"
             ),
         },

@@ -35,7 +35,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-python3 /root/edge-cluster-scheduler/multi-agent/server/flask_openai_server.py \
+python3 /root/edge-cluster-scheduler/multi-agent/rk_server/flask_openai_server.py \
   --rkllm_model_path="${MODEL_PATH}" \
   --target_platform="${TARGET_PLATFORM}" &
 llm_pid=$!
@@ -45,7 +45,7 @@ if ! wait_for_port 127.0.0.1 "${LLM_PORT}" 120; then
   exit 1
 fi
 
-python3 /root/edge-cluster-scheduler/multi-agent/server/main_agent.py \
+python3 /root/edge-cluster-scheduler/multi-agent/rk_server/main_agent.py \
   --host 0.0.0.0 \
   --port "${MAIN_AGENT_PORT}" \
   --llm_api_url "http://127.0.0.1:${LLM_PORT}/v1/chat/completions" \

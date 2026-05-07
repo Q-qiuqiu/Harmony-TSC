@@ -58,7 +58,7 @@ if ! wait_for_port 127.0.0.1 "${LLM_PORT}" 120; then
   exit 1
 fi
 
-python3 /workspace/multi-agent/server/image_agent.py \
+python3 /workspace/multi-agent/rk_server/image_agent.py \
   --host 0.0.0.0 \
   --port "${AGENT_PORT}" \
   --llm_api_url "${LLM_URL}" &

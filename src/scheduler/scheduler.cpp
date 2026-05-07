@@ -95,6 +95,53 @@ bool WaitForServicePort(const std::string &ip, int port, std::chrono::seconds ti
     return false;
 }
 
+void UpsertEnv(std::vector<std::string> &env_list, const std::string &key, const std::string &value) {
+    const std::string prefix = key + "=";
+    for (auto &item: env_list) {
+        if (item.rfind(prefix, 0) == 0) {
+            item = prefix + value;
+            return;
+        }
+    }
+    env_list.push_back(prefix + value);
+}
+
+std::optional<std::string> ResolveLocalIpForTarget(const std::string &target_ip, int target_port = 2375) {
+    int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) {
+        return std::nullopt;
+    }
+
+    sockaddr_in remote_addr{};
+    remote_addr.sin_family = AF_INET;
+    remote_addr.sin_port = htons(static_cast<uint16_t>(target_port));
+    if (inet_pton(AF_INET, target_ip.c_str(), &remote_addr.sin_addr) != 1) {
+        close(sock);
+        return std::nullopt;
+    }
+
+    if (connect(sock, reinterpret_cast<sockaddr *>(&remote_addr), sizeof(remote_addr)) != 0) {
+        close(sock);
+        return std::nullopt;
+    }
+
+    sockaddr_in local_addr{};
+    socklen_t len = sizeof(local_addr);
+    if (getsockname(sock, reinterpret_cast<sockaddr *>(&local_addr), &len) != 0) {
+        close(sock);
+        return std::nullopt;
+    }
+
+    char ip_buf[INET_ADDRSTRLEN] = {0};
+    const char *ip_str = inet_ntop(AF_INET, &local_addr.sin_addr, ip_buf, sizeof(ip_buf));
+    close(sock);
+    if (!ip_str) {
+        return std::nullopt;
+    }
+
+    return std::string(ip_str);
+}
+
 std::optional<SubAgentRuntimeConfig> LoadSubAgentRuntimeConfig(const std::string &agent_name, DeviceType device_type) {
     const auto profile_path = std::filesystem::path(ABSOLUTE_CONFIG_PATH) / "multi_agent_info.json";
     std::ifstream file(profile_path);
@@ -718,6 +765,14 @@ std::optional<SrvInfo> Docker_scheduler::startSubAgentOnDevice(const std::string
 
     const auto runtime_config = runtime_config_opt.value();
     CreateContainerParam cparam = runtime_config.create_param;
+    if (auto gateway_host_ip = ResolveLocalIpForTarget(dev.ip_address); gateway_host_ip.has_value()) {
+        UpsertEnv(cparam.env, "GATEWAY_HOST", gateway_host_ip.value());
+        spdlog::info("Resolved dynamic gateway host for sub agent, agent_name:{}, target_ip:{}, gateway_host:{}",
+                     agent_name, dev.ip_address, gateway_host_ip.value());
+    } else {
+        spdlog::warn("Failed to resolve dynamic gateway host for sub agent, keep configured GATEWAY_HOST, agent_name:{}, target_ip:{}",
+                     agent_name, dev.ip_address);
+    }
     const auto startup_timeout = std::chrono::seconds(std::max(runtime_config.startup_timeout_sec, 1));
     string docker_version = GetDockerVersion(dev);
     DockerClient docker_client(dev.ip_address, 2375, docker_version);

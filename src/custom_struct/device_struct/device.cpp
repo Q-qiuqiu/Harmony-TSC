@@ -20,7 +20,7 @@ std::string GetDockerVersion(const Device& dev) {
     std::string docker_version;
 
     if(dev.type==DeviceType::ATLAS_H){
-        docker_version = "v1.47";
+        docker_version = "v1.44";
     }else if(dev.type==DeviceType::RK3588){
         docker_version = "v1.45";
     }else if(dev.type==DeviceType::ATLAS_L){
@@ -30,5 +30,4 @@ std::string GetDockerVersion(const Device& dev) {
     }
     return docker_version;
 }
-
 

@@ -126,7 +126,7 @@ def call_llm(messages, llm_api_url=DEFAULT_LLM_API_URL, model_name=DEFAULT_LLM_M
     }
 
 
-def call_mcp_server(requests, server_path=DEFAULT_MCP_SERVER_PATH, timeout=30):
+def call_mcp_server(requests, server_path=DEFAULT_MCP_SERVER_PATH, timeout=60):
     process = subprocess.Popen(
         [sys.executable, server_path],
         stdin=subprocess.PIPE,
