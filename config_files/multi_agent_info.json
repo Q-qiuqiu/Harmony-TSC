@@ -105,7 +105,7 @@
             "MAX_GEN_TOKEN=8192",
             "START_LOCAL_LLM=1",
             "IMAGE_AGENT_PORT=8083",
-            "GATEWAY_HOST=172.17.0.1",
+            "GATEWAY_HOST=192.168.58.3",
             "GATEWAY_PORT=6666"
           ],
           "host_config_binds": [
@@ -253,7 +253,7 @@
             "MAX_GEN_TOKEN=8192",
             "START_LOCAL_LLM=1",
             "TEXT_AGENT_PORT=8085",
-            "GATEWAY_HOST=172.17.0.1",
+            "GATEWAY_HOST=192.168.58.3",
             "GATEWAY_PORT=6666"
           ],
           "host_config_binds": [
@@ -401,7 +401,7 @@
             "MAX_GEN_TOKEN=8192",
             "START_LOCAL_LLM=1",
             "SEGMENTATION_AGENT_PORT=8086",
-            "GATEWAY_HOST=172.17.0.1",
+            "GATEWAY_HOST=192.168.58.3",
             "GATEWAY_PORT=6666"
           ],
           "host_config_binds": [
