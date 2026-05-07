@@ -104,10 +104,12 @@ def choose_execution_target(user_text, image_name, execution_candidates, sub_age
         llm_api_url=LLM_API_URL,
         model_name=LLM_MODEL_NAME,
     )
+    raw_content = model_result["content"].strip()
+    print(f"segmentation agent raw model selection: {raw_content}", flush=True)
     try:
-        selection = parse_json_object(model_result["content"])
+        selection = parse_json_object(raw_content)
     except json.JSONDecodeError as exc:
-        raise RuntimeError(f"segmentation agent selection returned invalid JSON: {model_result['content']}") from exc
+        raise RuntimeError(f"segmentation agent selection returned invalid JSON: {raw_content}") from exc
     task_type = selection.get("task_type")
     target_global_id = selection.get("target_global_id")
 
@@ -174,6 +176,7 @@ def summarize_result(user_text, selected_execution, tool_result):
         model_name=LLM_MODEL_NAME,
     )
     content = model_result["content"].strip()
+    print(f"segmentation agent raw model summary: {content}", flush=True)
     if not content:
         raise RuntimeError("segmentation agent returned empty summary")
     return content, model_result

@@ -15,6 +15,9 @@ REPO_ROOT = os.path.normpath(os.path.join(MULTI_AGENT_DIR, ".."))
 DEFAULT_MCP_SERVER_PATH = os.path.join(MULTI_AGENT_DIR, "tools", "mcp_server.py")
 DEFAULT_LLM_API_URL = os.environ.get("LLM_API_URL", "http://127.0.0.1:8081/v1/chat/completions")
 DEFAULT_LLM_MODEL_NAME = os.environ.get("LLM_MODEL_NAME", "deepseek-r1-distill-qwen-1.5b")
+DEFAULT_LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "256"))
+DEFAULT_LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.2"))
+DEFAULT_LLM_TOP_P = float(os.environ.get("LLM_TOP_P", "0.9"))
 DEFAULT_IMAGE_AGENT_URL = os.environ.get("IMAGE_AGENT_URL", "http://127.0.0.1:8083/v1/sub-agents/image/execute")
 DEFAULT_TEXT_AGENT_URL = os.environ.get("TEXT_AGENT_URL", "http://127.0.0.1:8085/v1/sub-agents/text/execute")
 DEFAULT_SEGMENTATION_AGENT_URL = os.environ.get(
@@ -107,12 +110,20 @@ def get_sub_agent_profile(agent_name, profile_path=DEFAULT_SUB_AGENT_PROFILE_PAT
     return profile
 
 
-def call_llm(messages, llm_api_url=DEFAULT_LLM_API_URL, model_name=DEFAULT_LLM_MODEL_NAME):
+def call_llm(
+    messages,
+    llm_api_url=DEFAULT_LLM_API_URL,
+    model_name=DEFAULT_LLM_MODEL_NAME,
+    max_tokens=DEFAULT_LLM_MAX_TOKENS,
+):
     raw = post_json(
         llm_api_url,
         {
             "model": model_name,
             "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": DEFAULT_LLM_TEMPERATURE,
+            "top_p": DEFAULT_LLM_TOP_P,
             "stream": False,
         },
     )

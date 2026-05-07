@@ -106,7 +106,10 @@
             "START_LOCAL_LLM=1",
             "IMAGE_AGENT_PORT=8083",
             "GATEWAY_HOST=192.168.58.3",
-            "GATEWAY_PORT=6666"
+            "GATEWAY_PORT=6666",
+            "LLM_MAX_TOKENS=256",
+            "LLM_TEMPERATURE=0.2",
+            "LLM_TOP_P=0.9"
           ],
           "host_config_binds": [
             "/root/Harmony-TSC/multi-agent:/workspace/multi-agent",
@@ -254,7 +257,10 @@
             "START_LOCAL_LLM=1",
             "TEXT_AGENT_PORT=8085",
             "GATEWAY_HOST=192.168.58.3",
-            "GATEWAY_PORT=6666"
+            "GATEWAY_PORT=6666",
+            "LLM_MAX_TOKENS=256",
+            "LLM_TEMPERATURE=0.2",
+            "LLM_TOP_P=0.9"
           ],
           "host_config_binds": [
             "/root/Harmony-TSC/multi-agent:/workspace/multi-agent",
@@ -402,7 +408,10 @@
             "START_LOCAL_LLM=1",
             "SEGMENTATION_AGENT_PORT=8086",
             "GATEWAY_HOST=192.168.58.3",
-            "GATEWAY_PORT=6666"
+            "GATEWAY_PORT=6666",
+            "LLM_MAX_TOKENS=256",
+            "LLM_TEMPERATURE=0.2",
+            "LLM_TOP_P=0.9"
           ],
           "host_config_binds": [
             "/root/Harmony-TSC/multi-agent:/workspace/multi-agent",

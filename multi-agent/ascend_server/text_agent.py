@@ -106,7 +106,9 @@ def choose_execution_target(user_text, execution_candidates, sub_agent_profile):
         llm_api_url=LLM_API_URL,
         model_name=LLM_MODEL_NAME,
     )
-    selection = parse_json_object(model_result["content"])
+    raw_content = model_result["content"].strip()
+    print(f"text agent raw model selection: {raw_content}", flush=True)
+    selection = parse_json_object(raw_content)
     task_type = selection.get("task_type")
     target_global_id = selection.get("target_global_id")
 

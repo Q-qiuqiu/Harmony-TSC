@@ -1,6 +1,7 @@
 import argparse
 import base64
 import json
+import re
 import threading
 from flask import Flask, Response, jsonify, request
 
@@ -142,20 +143,41 @@ def choose_execution_target(user_text, image_name, target_node, execution_candid
         build_model_selection_messages(user_text, image_name, target_node, execution_candidates, sub_agent_profile),
         llm_api_url=LLM_API_URL,
         model_name=LLM_MODEL_NAME,
+        max_tokens=64,
     )
-    selection = parse_json_object(model_result["content"])
+    raw_content = model_result["content"].strip()
+    print(f"image agent raw model selection: {raw_content}", flush=True)
+    try:
+        selection = parse_json_object(raw_content)
+    except json.JSONDecodeError:
+        selection = {}
+
     task_type = selection.get("task_type")
     target_global_id = selection.get("target_global_id")
-    if not task_type or not target_global_id:
-        raise RuntimeError("sub image agent selection missing task_type or target_global_id")
 
-    matched_candidate = None
+    matched_candidate = find_matching_candidate(execution_candidates, task_type, target_global_id)
+    if matched_candidate is None:
+        matched_candidate = choose_fallback_candidate(user_text, execution_candidates)
+        selection = {
+            "task_type": matched_candidate["task_type"],
+            "target_global_id": matched_candidate["target_global_id"],
+            "reason": "model selection did not return a valid execution pair; used deterministic fallback",
+        }
+        print(f"image agent fallback selection: {json.dumps(selection, ensure_ascii=False)}", flush=True)
+
+    selection["candidate"] = matched_candidate
+    return selection, model_result
+
+
+def find_matching_candidate(execution_candidates, task_type, target_global_id):
+    if not task_type or not target_global_id:
+        return None
     for node_item in execution_candidates.get("result", []):
         if not isinstance(node_item, dict) or node_item.get("target_global_id") != target_global_id:
             continue
         for model_item in node_item.get("models", []):
             if isinstance(model_item, dict) and model_item.get("task_type") == task_type:
-                matched_candidate = {
+                return {
                     "target_global_id": node_item.get("target_global_id"),
                     "ip_address": node_item.get("ip_address"),
                     "device_type": node_item.get("device_type"),
@@ -164,15 +186,59 @@ def choose_execution_target(user_text, image_name, target_node, execution_candid
                     "model_name": model_item.get("model_name"),
                     "overhead": model_item.get("overhead"),
                 }
-                break
-        if matched_candidate is not None:
-            break
-    if matched_candidate is None:
-        raise RuntimeError(
-            f"sub image agent selected unsupported execution pair: task_type={task_type}, target_global_id={target_global_id}"
-        )
-    selection["candidate"] = matched_candidate
-    return selection, model_result
+    return None
+
+
+def flatten_execution_candidates(execution_candidates):
+    flattened = []
+    for node_item in execution_candidates.get("result", []):
+        if not isinstance(node_item, dict):
+            continue
+        for model_item in node_item.get("models", []):
+            if not isinstance(model_item, dict):
+                continue
+            flattened.append(
+                {
+                    "target_global_id": node_item.get("target_global_id"),
+                    "ip_address": node_item.get("ip_address"),
+                    "device_type": node_item.get("device_type"),
+                    "resource": node_item.get("resource"),
+                    "task_type": model_item.get("task_type"),
+                    "model_name": model_item.get("model_name"),
+                    "overhead": model_item.get("overhead") or {},
+                }
+            )
+    return flattened
+
+
+def choose_fallback_candidate(user_text, execution_candidates):
+    candidates = flatten_execution_candidates(execution_candidates)
+    if not candidates:
+        raise RuntimeError("no execution candidates available for fallback selection")
+
+    normalized_text = user_text.lower()
+    wants_detection = bool(re.search(r"检测|目标|物体|框|detect|detection|object", normalized_text))
+    wants_speed = bool(re.search(r"快|速度|fast|faster|speed", normalized_text))
+    wants_classification = bool(re.search(r"分类|种类|类别|class|classification", normalized_text))
+
+    def by_proc_time(item):
+        overhead = item.get("overhead") or {}
+        return float(overhead.get("proc_time", 1e9))
+
+    if wants_detection:
+        for item in candidates:
+            if item.get("task_type") == "YoloV5":
+                return item
+
+    if wants_speed or wants_classification:
+        classification_candidates = [
+            item for item in candidates
+            if item.get("task_type") in {"MobileNet", "ResNet50"}
+        ]
+        if classification_candidates:
+            return min(classification_candidates, key=by_proc_time)
+
+    return min(candidates, key=by_proc_time)
 
 
 def summarize_result(user_text, selected_execution, tool_result):
@@ -182,6 +248,7 @@ def summarize_result(user_text, selected_execution, tool_result):
         model_name=LLM_MODEL_NAME,
     )
     content = model_result["content"].strip()
+    print(f"image agent raw model summary: {content}", flush=True)
     if not content:
         raise RuntimeError("sub image agent returned empty summary")
     return content, model_result
