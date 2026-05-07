@@ -8,6 +8,8 @@
 const char *kGatewayIp = "192.168.58.3";
 const int kGatewayPort = 6666;
 const int kAgentPort = 8000;
+const double kUniformNetLatencyMs = 1.0;
+const double kUniformNetBandwidthMbps = 1000.0;
 
 using json = nlohmann::json;
 using namespace httplib;
@@ -75,8 +77,8 @@ int main() {
         dev_info.cpu_used = collector.GetCpuUsage();
         dev_info.mem_used = collector.GetMemoryUsage();
         dev_info.xpu_used = collector.GetNpuUsage();
-        dev_info.net_latency = collector.GetNetLatency(); // ms
-        dev_info.net_bandwidth = 1000; // Mbps (constant)
+        dev_info.net_latency = kUniformNetLatencyMs;
+        dev_info.net_bandwidth = kUniformNetBandwidthMbps;
         std::string result = BuildSuccess(dev_info.to_json());
         res.set_content(result, "application/json");
     });

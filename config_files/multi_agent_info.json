@@ -64,7 +64,7 @@
           "env": [
             "PYTHONUNBUFFERED=1",
             "LLM_API_URL=http://127.0.0.1:8081/v1/chat/completions",
-            "IMAGE_AGENT_PORT=8083",
+            "IMAGE_AGENT_PORT=8084",
             "RKLLM_MODEL_PATH=/models/Qwen3-1.7B-rk3588-w8a8.rkllm",
             "RKLLM_TARGET_PLATFORM=rk3588"
           ],
@@ -77,8 +77,8 @@
           ],
           "devices": [],
           "host_ip": "0.0.0.0",
-          "host_port": 8083,
-          "container_port": 8083,
+          "host_port": 8084,
+          "container_port": 8084,
           "has_tty": false,
           "network_config": "bridge"
         },
@@ -104,7 +104,7 @@
             "MAX_SEQ_LEN=8192",
             "MAX_GEN_TOKEN=8192",
             "START_LOCAL_LLM=1",
-            "IMAGE_AGENT_PORT=8083",
+            "IMAGE_AGENT_PORT=8084",
             "GATEWAY_HOST=192.168.58.3",
             "GATEWAY_PORT=6666",
             "LLM_MAX_TOKENS=256",
@@ -164,8 +164,8 @@
             "/dev/log_drv"
           ],
           "host_ip": "0.0.0.0",
-          "host_port": 8083,
-          "container_port": 8083,
+          "host_port": 8084,
+          "container_port": 8084,
           "has_tty": false,
           "network_config": "bridge"
         }

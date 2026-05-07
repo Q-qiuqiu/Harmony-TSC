@@ -5,7 +5,7 @@ MODEL_PATH="${RKLLM_MODEL_PATH:-/models/Qwen3-1.7B-rk3588-w8a8.rkllm}"
 TARGET_PLATFORM="${RKLLM_TARGET_PLATFORM:-rk3588}"
 LLM_PORT="${LLM_PORT:-8081}"
 LLM_URL="${LLM_API_URL:-http://127.0.0.1:${LLM_PORT}/v1/chat/completions}"
-AGENT_PORT="${IMAGE_AGENT_PORT:-8083}"
+AGENT_PORT="${IMAGE_AGENT_PORT:-8084}"
 
 if [[ -z "${GATEWAY_HOST:-}" ]]; then
   if [[ -x /sbin/ip ]]; then

@@ -108,29 +108,45 @@ struct DeviceStatus{
     double net_latency;
     double net_bandwidth;
     void from_json(const json& j){
-        j.at("mem").get_to(mem_used);
+        if (j.contains("mem_used")) {
+            j.at("mem_used").get_to(mem_used);
+        } else {
+            j.at("mem").get_to(mem_used);
+        }
         j.at("cpu_used").get_to(cpu_used);
-        j.at("xpu_used").get_to(xpu_used);
+        if (j.contains("npu_used")) {
+            j.at("npu_used").get_to(xpu_used);
+        } else {
+            j.at("xpu_used").get_to(xpu_used);
+        }
         j.at("net_latency").get_to(net_latency);
         j.at("net_bandwidth").get_to(net_bandwidth);
     }
     void show(){
-        printf(" mem_used:%f\tcpu_used:%f\txpu_used:%f\n",mem_used,cpu_used,xpu_used);
+        printf(" mem_used:%f\tcpu_used:%f\tnpu_used:%f\n",mem_used,cpu_used,xpu_used);
     }
     static DeviceStatus from_json_static(const json& j){
         DeviceStatus status;
-        j.at("mem").get_to(status.mem_used);
+        if (j.contains("mem_used")) {
+            j.at("mem_used").get_to(status.mem_used);
+        } else {
+            j.at("mem").get_to(status.mem_used);
+        }
         j.at("cpu_used").get_to(status.cpu_used);
-        j.at("xpu_used").get_to(status.xpu_used);
+        if (j.contains("npu_used")) {
+            j.at("npu_used").get_to(status.xpu_used);
+        } else {
+            j.at("xpu_used").get_to(status.xpu_used);
+        }
         j.at("net_latency").get_to(status.net_latency);
         j.at("net_bandwidth").get_to(status.net_bandwidth);
         return status;
     }
     json to_json(){
         json j;
-        j["mem"]=this->mem_used;
+        j["mem_used"]=this->mem_used;
         j["cpu_used"]=this->cpu_used;
-        j["xpu_used"]=this->xpu_used;
+        j["npu_used"]=this->xpu_used;
         j["net_latency"]=this->net_latency;
         j["net_bandwidth"]=this->net_bandwidth;
         return j;

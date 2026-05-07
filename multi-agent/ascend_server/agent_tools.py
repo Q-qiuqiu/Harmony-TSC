@@ -18,7 +18,7 @@ DEFAULT_LLM_MODEL_NAME = os.environ.get("LLM_MODEL_NAME", "deepseek-r1-distill-q
 DEFAULT_LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", "256"))
 DEFAULT_LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", "0.2"))
 DEFAULT_LLM_TOP_P = float(os.environ.get("LLM_TOP_P", "0.9"))
-DEFAULT_IMAGE_AGENT_URL = os.environ.get("IMAGE_AGENT_URL", "http://127.0.0.1:8083/v1/sub-agents/image/execute")
+DEFAULT_IMAGE_AGENT_URL = os.environ.get("IMAGE_AGENT_URL", "http://127.0.0.1:8084/v1/sub-agents/image/execute")
 DEFAULT_TEXT_AGENT_URL = os.environ.get("TEXT_AGENT_URL", "http://127.0.0.1:8085/v1/sub-agents/text/execute")
 DEFAULT_SEGMENTATION_AGENT_URL = os.environ.get(
     "SEGMENTATION_AGENT_URL",

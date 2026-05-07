@@ -497,7 +497,7 @@ def multi_agent_chat():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=8084)
+    parser.add_argument("--port", type=int, default=8083)
     parser.add_argument("--llm_api_url", default=DEFAULT_LLM_API_URL)
     parser.add_argument("--llm_model_name", default=DEFAULT_LLM_MODEL_NAME)
     parser.add_argument("--image_agent_url", default=DEFAULT_IMAGE_AGENT_URL)

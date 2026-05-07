@@ -7,14 +7,11 @@
         "cmds": [],
         "args": [],
         "host_config_privileged": true,
-        "env": [
-        ],
-        "host_config_binds": [
-        ],
-        "devices": [
-        ],
+        "env": [],
+        "host_config_binds": [],
+        "devices": [],
         "host_ip": "0.0.0.0",
-        "host_port": 8080,
+        "host_port": 6101,
         "container_port": 8080,
         "has_tty": false
       },
@@ -78,7 +75,7 @@
           "/dev/log_drv"
         ],
         "host_ip": "0.0.0.0",
-        "host_port": 8080,
+        "host_port": 6101,
         "container_port": 8080,
         "has_tty": false
       },
@@ -142,7 +139,7 @@
           "/dev/log_drv"
         ],
         "host_ip": "0.0.0.0",
-        "host_port": 8081,
+        "host_port": 6101,
         "container_port": 8080,
         "has_tty": false
       },
@@ -162,14 +159,11 @@
         "cmds": [],
         "args": [],
         "host_config_privileged": true,
-        "env": [
-        ],
-        "host_config_binds": [
-        ],
-        "devices": [
-        ],
+        "env": [],
+        "host_config_binds": [],
+        "devices": [],
         "host_ip": "0.0.0.0",
-        "host_port": 8080,
+        "host_port": 6103,
         "container_port": 8080,
         "has_tty": false
       },
@@ -233,7 +227,7 @@
           "/dev/log_drv"
         ],
         "host_ip": "0.0.0.0",
-        "host_port": 8080,
+        "host_port": 6103,
         "container_port": 8080,
         "has_tty": false
       },
@@ -297,7 +291,7 @@
           "/dev/log_drv"
         ],
         "host_ip": "0.0.0.0",
-        "host_port": 8080,
+        "host_port": 6103,
         "container_port": 8080,
         "has_tty": false
       },
@@ -317,14 +311,11 @@
         "cmds": [],
         "args": [],
         "host_config_privileged": true,
-        "env": [
-        ],
-        "host_config_binds": [
-        ],
-        "devices": [
-        ],
+        "env": [],
+        "host_config_binds": [],
+        "devices": [],
         "host_ip": "0.0.0.0",
-        "host_port": 8080,
+        "host_port": 6104,
         "container_port": 8080,
         "has_tty": false
       },
@@ -388,7 +379,7 @@
           "/dev/log_drv"
         ],
         "host_ip": "0.0.0.0",
-        "host_port": 8080,
+        "host_port": 6104,
         "container_port": 8080,
         "has_tty": false
       },
@@ -452,7 +443,7 @@
           "/dev/log_drv"
         ],
         "host_ip": "0.0.0.0",
-        "host_port": 8080,
+        "host_port": 6104,
         "container_port": 8080,
         "has_tty": false
       },
@@ -518,7 +509,7 @@
           "/dev/log_drv"
         ],
         "host_ip": "0.0.0.0",
-        "host_port": 5001,
+        "host_port": 6100,
         "container_port": 6000,
         "has_tty": false
       },
@@ -582,7 +573,7 @@
           "/dev/log_drv"
         ],
         "host_ip": "0.0.0.0",
-        "host_port": 5001,
+        "host_port": 6100,
         "container_port": 6000,
         "has_tty": false
       },
@@ -648,7 +639,7 @@
           "/dev/log_drv"
         ],
         "host_ip": "0.0.0.0",
-        "host_port": 6002,
+        "host_port": 6102,
         "container_port": 6002,
         "has_tty": false
       },
@@ -712,7 +703,7 @@
           "/dev/log_drv"
         ],
         "host_ip": "0.0.0.0",
-        "host_port": 6002,
+        "host_port": 6102,
         "container_port": 6002,
         "has_tty": false
       },
@@ -850,7 +841,7 @@
         "proc_time": 1,
         "mem_usage": 0.03,
         "cpu_usage": 0.12,
-        "xpu_usage": 0.0
+        "xpu_usage": 0
       }
     }
   }
