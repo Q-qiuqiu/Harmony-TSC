@@ -101,12 +101,28 @@ def build_execution_selection_messages(user_text, execution_candidates, sub_agen
 
 
 def choose_execution_target(user_text, execution_candidates, sub_agent_profile):
+    if len(execution_candidates) == 1:
+        candidate = execution_candidates[0]
+        return {
+            "task_type": candidate.get("task_type"),
+            "target_global_id": candidate.get("target_global_id"),
+            "real_url": "textclassify",
+            "reason": "Only one Bert execution candidate is available.",
+            "candidate": candidate,
+        }, {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        }
+
     model_result = call_llm(
         build_execution_selection_messages(user_text, execution_candidates, sub_agent_profile),
         llm_api_url=LLM_API_URL,
         model_name=LLM_MODEL_NAME,
     )
-    selection = parse_json_object(model_result["content"])
+    try:
+        selection = parse_json_object(model_result["content"])
+    except json.JSONDecodeError:
+        selection = {}
     task_type = selection.get("task_type")
     target_global_id = selection.get("target_global_id")
 
@@ -116,9 +132,14 @@ def choose_execution_target(user_text, execution_candidates, sub_agent_profile):
             candidate = item
             break
     if candidate is None:
-        raise RuntimeError(
-            f"text agent selected unsupported execution pair: task_type={task_type}, target_global_id={target_global_id}"
-        )
+        for item in execution_candidates:
+            if item.get("task_type") == "Bert":
+                candidate = item
+                task_type = item.get("task_type")
+                target_global_id = item.get("target_global_id")
+                break
+    if candidate is None:
+        raise RuntimeError("text agent could not find a supported Bert execution candidate")
 
     return {
         "task_type": task_type,

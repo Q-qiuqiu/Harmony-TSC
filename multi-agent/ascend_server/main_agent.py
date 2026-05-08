@@ -193,7 +193,8 @@ def get_forced_sub_agent(text_fields):
     return None
 
 
-def filter_nodes_for_sub_agent(cluster_resources, sub_agent_name):
+def filter_nodes_for_sub_agent(cluster_resources, sub_agent_name, excluded_global_ids=None):
+    excluded_global_ids = set(excluded_global_ids or [])
     sub_agent_catalog = load_sub_agent_catalog()
     profile = sub_agent_catalog.get(sub_agent_name)
     if not isinstance(profile, dict):
@@ -207,7 +208,11 @@ def filter_nodes_for_sub_agent(cluster_resources, sub_agent_name):
     filtered_nodes = [
         node
         for node in cluster_resources.get("result", [])
-        if isinstance(node, dict) and node.get("type") in supported_device_types
+        if (
+            isinstance(node, dict)
+            and node.get("type") in supported_device_types
+            and node.get("global_id") not in excluded_global_ids
+        )
     ]
 
     if not filtered_nodes:
@@ -221,9 +226,9 @@ def filter_nodes_for_sub_agent(cluster_resources, sub_agent_name):
     }
 
 
-def select_target_node_for_sub_agent(user_text, cluster_resources, sub_agent_name):
+def select_target_node_for_sub_agent(user_text, cluster_resources, sub_agent_name, excluded_global_ids=None):
     sub_agent_catalog = load_sub_agent_catalog()
-    filtered_cluster_resources = filter_nodes_for_sub_agent(cluster_resources, sub_agent_name)
+    filtered_cluster_resources = filter_nodes_for_sub_agent(cluster_resources, sub_agent_name, excluded_global_ids)
     model_result = call_llm(
         build_main_agent_messages(user_text, filtered_cluster_resources, sub_agent_catalog, sub_agent_name),
         llm_api_url=LLM_API_URL,
@@ -282,7 +287,7 @@ def resolve_sub_agent_url(agent_name, start_result):
     raise RuntimeError(f"unknown sub agent fallback url: {agent_name}")
 
 
-def invoke_sub_agent(selection, user_text, image_file):
+def invoke_sub_agent(selection, user_text, image_file, image_bytes=None):
     sub_agent_name = selection["sub_agent"]
     fields = {
         "user_text": user_text,
@@ -294,7 +299,8 @@ def invoke_sub_agent(selection, user_text, image_file):
     if sub_agent_name in {"image_agent", "segmentation_agent"}:
         if image_file is None or not image_file.filename:
             raise RuntimeError(f"{sub_agent_name} requires an uploaded image")
-        image_bytes = image_file.read()
+        if image_bytes is None:
+            image_bytes = image_file.read()
         files.append(
             {
                 "field_name": "image",
@@ -318,6 +324,42 @@ def invoke_sub_agent(selection, user_text, image_file):
     if "error" in sub_agent_response:
         raise RuntimeError(sub_agent_response["error"].get("message", f"{sub_agent_name} returned an error"))
     return sub_agent_response, start_result, sub_agent_url
+
+
+def invoke_sub_agent_with_failover(user_text, cluster_resources, sub_agent_name, image_file):
+    excluded_global_ids = set()
+    failures = []
+    image_bytes = image_file.read() if image_file is not None and image_file.filename else None
+
+    while True:
+        selection = select_target_node_for_sub_agent(
+            user_text,
+            cluster_resources,
+            sub_agent_name,
+            excluded_global_ids,
+        )
+        try:
+            sub_agent_response, start_result, sub_agent_url = invoke_sub_agent(
+                selection,
+                user_text,
+                image_file,
+                image_bytes,
+            )
+            return selection, sub_agent_response, start_result, sub_agent_url, failures
+        except Exception as exc:
+            failed_id = selection.get("target_global_id")
+            failures.append({
+                "target_global_id": failed_id,
+                "reason": str(exc),
+            })
+            if failed_id:
+                excluded_global_ids.add(failed_id)
+            try:
+                filter_nodes_for_sub_agent(cluster_resources, sub_agent_name, excluded_global_ids)
+            except RuntimeError as no_candidates_exc:
+                raise RuntimeError(
+                    f"failed to start {sub_agent_name} on all candidate nodes: {failures}; {no_candidates_exc}"
+                ) from exc
 
 
 @app.route("/v1/multi-agent/chat", methods=["POST"])
@@ -369,8 +411,12 @@ def multi_agent_chat():
         cluster_resources = json.loads(call_mcp_tool("get_cluster_resources"))
         sub_agent_selection = select_sub_agent(user_text, image_file is not None and bool(image_file.filename), forced_sub_agent)
         sub_agent_name = sub_agent_selection["sub_agent"]
-        selection = select_target_node_for_sub_agent(user_text, cluster_resources, sub_agent_name)
-        sub_agent_response, start_result, sub_agent_url = invoke_sub_agent(selection, user_text, image_file)
+        selection, sub_agent_response, start_result, sub_agent_url, startup_failures = invoke_sub_agent_with_failover(
+            user_text,
+            cluster_resources,
+            sub_agent_name,
+            image_file,
+        )
         final_message, final_usage = make_final_answer(user_text, sub_agent_name, sub_agent_response)
 
         sub_agent_select_usage = sub_agent_selection["_usage"]
@@ -407,6 +453,7 @@ def multi_agent_chat():
                     "target_node": selection["target_node"],
                 },
                 "sub_agent_startup": start_result,
+                "sub_agent_startup_failures": startup_failures,
                 "sub_agent_url": sub_agent_url,
                 "sub_agent_result": sub_agent_response,
                 "usage": {
