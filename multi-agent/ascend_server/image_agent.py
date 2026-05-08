@@ -242,7 +242,43 @@ def choose_fallback_candidate(user_text, execution_candidates):
     return min(candidates, key=by_proc_time)
 
 
+def build_deterministic_summary(selected_execution, tool_result):
+    task_type = selected_execution.get("task_type")
+    results = tool_result.get("results") if isinstance(tool_result, dict) else None
+    if task_type in {"MobileNet", "ResNet50"} and isinstance(results, list) and results:
+        top_result = results[0]
+        if isinstance(top_result, dict):
+            class_name = top_result.get("class")
+            confidence = top_result.get("confidence")
+            exec_time = tool_result.get("exec_time")
+            if class_name:
+                parts = [f"图像分类结果：最可能是 {class_name}"]
+                if isinstance(confidence, (int, float)):
+                    parts.append(f"置信度 {confidence * 100:.2f}%")
+                if isinstance(exec_time, (int, float)):
+                    parts.append(f"模型耗时 {exec_time:.2f} ms")
+                parts.append(f"使用模型：{task_type}")
+                return "，".join(parts) + "。"
+
+    if task_type == "YoloV5" and isinstance(results, list):
+        exec_time = tool_result.get("exec_time") if isinstance(tool_result, dict) else None
+        parts = [f"目标检测完成，共检测到 {len(results)} 个结果"]
+        if isinstance(exec_time, (int, float)):
+            parts.append(f"模型耗时 {exec_time:.2f} ms")
+        parts.append("使用模型：YoloV5")
+        return "，".join(parts) + "。"
+
+    return None
+
+
 def summarize_result(user_text, selected_execution, tool_result):
+    deterministic_summary = build_deterministic_summary(selected_execution, tool_result)
+    if deterministic_summary:
+        return deterministic_summary, {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        }
+
     model_result = call_llm(
         build_result_summary_messages(user_text, selected_execution, tool_result),
         llm_api_url=LLM_API_URL,
