@@ -99,6 +99,19 @@ def build_execution_selection_messages(user_text, image_name, execution_candidat
 
 
 def choose_execution_target(user_text, image_name, execution_candidates, sub_agent_profile):
+    if len(execution_candidates) == 1:
+        candidate = execution_candidates[0]
+        return {
+            "task_type": candidate.get("task_type"),
+            "target_global_id": candidate.get("target_global_id"),
+            "real_url": "segmentation",
+            "reason": "Only one deeplabv3 execution candidate is available.",
+            "candidate": candidate,
+        }, {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        }
+
     model_result = call_llm(
         build_execution_selection_messages(user_text, image_name, execution_candidates, sub_agent_profile),
         llm_api_url=LLM_API_URL,
@@ -106,8 +119,8 @@ def choose_execution_target(user_text, image_name, execution_candidates, sub_age
     )
     try:
         selection = parse_json_object(model_result["content"])
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"segmentation agent selection returned invalid JSON: {model_result['content']}") from exc
+    except json.JSONDecodeError:
+        selection = {}
     task_type = selection.get("task_type")
     target_global_id = selection.get("target_global_id")
 
@@ -117,9 +130,14 @@ def choose_execution_target(user_text, image_name, execution_candidates, sub_age
             candidate = item
             break
     if candidate is None:
-        raise RuntimeError(
-            f"segmentation agent selected unsupported execution pair: task_type={task_type}, target_global_id={target_global_id}"
-        )
+        for item in execution_candidates:
+            if item.get("task_type") == SEGMENTATION_TASK_TYPE:
+                candidate = item
+                task_type = item.get("task_type")
+                target_global_id = item.get("target_global_id")
+                break
+    if candidate is None:
+        raise RuntimeError("segmentation agent could not find a supported deeplabv3 execution candidate")
 
     return {
         "task_type": task_type,
