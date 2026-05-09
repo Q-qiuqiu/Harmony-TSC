@@ -140,17 +140,26 @@ def build_execution_candidates(cluster_resources, task_catalog, sub_agent_profil
 
 
 def choose_execution_target(user_text, image_name, target_node, execution_candidates, sub_agent_profile):
-    model_result = call_llm(
-        build_model_selection_messages(user_text, image_name, target_node, execution_candidates, sub_agent_profile),
-        llm_api_url=LLM_API_URL,
-        model_name=LLM_MODEL_NAME,
-        max_tokens=64,
-    )
-    raw_content = model_result["content"].strip()
+    try:
+        model_result = call_llm(
+            build_model_selection_messages(user_text, image_name, target_node, execution_candidates, sub_agent_profile),
+            llm_api_url=LLM_API_URL,
+            model_name=LLM_MODEL_NAME,
+            max_tokens=64,
+        )
+        raw_content = model_result["content"].strip()
+    except Exception as exc:
+        model_result = {
+            "content": "",
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        }
+        raw_content = ""
+        print(f"image agent model selection failed: {exc}", flush=True)
     print(f"image agent raw model selection: {raw_content}", flush=True)
     try:
         selection = parse_json_object(raw_content)
-    except json.JSONDecodeError:
+    except Exception:
         selection = {}
 
     task_type = selection.get("task_type")

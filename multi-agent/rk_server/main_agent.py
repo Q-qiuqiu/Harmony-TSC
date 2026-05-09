@@ -36,6 +36,9 @@ SUB_AGENT_ENDPOINTS = {
     "segmentation_agent": "/v1/sub-agents/segmentation/execute",
 }
 SUPPORTED_SUB_AGENTS = set(SUB_AGENT_ENDPOINTS.keys())
+DIRECT_CHAT_ROUTE = "chat"
+UNSUPPORTED_TASK_ROUTE = "unsupported_task"
+SUPPORTED_ROUTES = SUPPORTED_SUB_AGENTS | {DIRECT_CHAT_ROUTE, UNSUPPORTED_TASK_ROUTE}
 
 
 def compact_sub_agent_catalog_for_selection(sub_agent_catalog):
@@ -98,16 +101,17 @@ def build_sub_agent_selection_messages(user_text, has_image, sub_agent_catalog):
             "role": "system",
             "content": (
                 "You are a main multi-agent scheduler.\n"
-                "Your first job is to select the best sub agent for the user request.\n"
+                "Your first job is to decide whether the user request needs a sub agent or can be answered directly.\n"
                 "Return JSON only with this schema:\n"
-                "{\"sub_agent\":\"image_agent\",\"reason\":\"<short reason>\"}\n"
+                "{\"route\":\"chat\",\"reason\":\"<short reason>\"}\n"
                 "Rules:\n"
-                "1. sub_agent must be one of the provided sub_agent_catalog keys.\n"
-                "2. Choose text_agent for text understanding or text classification requests.\n"
-                "3. Choose segmentation_agent for image segmentation requests.\n"
-                "4. Choose image_agent for other image detection, classification, or image reasoning requests.\n"
-                "5. If the chosen agent requires an image but has_image is false, choose a text-capable agent instead.\n"
-                "6. Never output anything except a single JSON object."
+                "1. route must be one of: chat, unsupported_task, or one of the provided sub_agent_catalog keys.\n"
+                "2. Choose chat for normal conversation, explanations, questions, greetings, or requests that do not need edge model execution.\n"
+                "3. Choose text_agent only for supported text classification or text understanding model tasks.\n"
+                "4. Choose segmentation_agent for image semantic segmentation requests when has_image is true.\n"
+                "5. Choose image_agent for image detection, image classification, or image reasoning requests when has_image is true.\n"
+                "6. Choose unsupported_task when the user asks for a model/tool task that no listed sub agent can handle, or when an image task lacks an image.\n"
+                "7. Never output anything except a single JSON object."
             ),
         },
         {
@@ -117,6 +121,25 @@ def build_sub_agent_selection_messages(user_text, has_image, sub_agent_catalog):
                 f"has_image:\n{json.dumps(has_image)}\n\n"
                 f"sub_agent_catalog:\n{json.dumps(compact_catalog, ensure_ascii=False)}"
             ),
+        },
+    ]
+
+
+def build_direct_chat_messages(user_text, reason=None):
+    reason_text = reason or "direct chat"
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are the main agent.\n"
+                "Answer the user directly in concise natural Chinese.\n"
+                "Do not mention sub agents, scheduling, JSON, node ids, URLs, or internal routing.\n"
+                "If the user requested a task that the current system cannot execute, explain the limitation briefly and provide a helpful fallback answer."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"user_text:\n{user_text}\n\nroute_reason:\n{reason_text}",
         },
     ]
 
@@ -209,17 +232,27 @@ def make_final_answer(user_text, sub_agent_name, sub_agent_response):
     return content, model_result
 
 
+def make_direct_chat_answer(user_text, reason=None):
+    model_result = call_llm(
+        build_direct_chat_messages(user_text, reason),
+        llm_api_url=LLM_API_URL,
+        model_name=LLM_MODEL_NAME,
+    )
+    return model_result["content"].strip(), model_result
+
+
 def parse_bool_form_value(value):
     if value is None:
         return False
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
-def select_sub_agent(user_text, has_image, forced_sub_agent=None):
+def select_request_route(user_text, has_image, forced_sub_agent=None):
     if forced_sub_agent:
         if forced_sub_agent not in SUPPORTED_SUB_AGENTS:
             raise RuntimeError(f"unsupported sub_agent: {forced_sub_agent}")
         return {
+            "route": forced_sub_agent,
             "sub_agent": forced_sub_agent,
             "reason": "sub_agent explicitly requested by client",
             "_usage": {
@@ -234,12 +267,23 @@ def select_sub_agent(user_text, has_image, forced_sub_agent=None):
         llm_api_url=LLM_API_URL,
         model_name=LLM_MODEL_NAME,
     )
-    selection = parse_json_object(model_result["content"])
-    sub_agent_name = selection.get("sub_agent")
-    if sub_agent_name not in SUPPORTED_SUB_AGENTS:
-        raise RuntimeError(f"main agent selected unsupported sub_agent: {sub_agent_name}")
-    if sub_agent_name in {"image_agent", "segmentation_agent"} and not has_image:
-        raise RuntimeError(f"main agent selected {sub_agent_name}, but request has no image")
+    try:
+        selection = parse_json_object(model_result["content"])
+    except Exception:
+        selection = {
+            "route": DIRECT_CHAT_ROUTE,
+            "reason": "route model did not return valid JSON; fallback to direct chat",
+        }
+    route = selection.get("route") or selection.get("sub_agent")
+    if route not in SUPPORTED_ROUTES:
+        route = DIRECT_CHAT_ROUTE
+        selection["reason"] = f"unsupported route selected by model; fallback to direct chat"
+    if route in {"image_agent", "segmentation_agent"} and not has_image:
+        route = UNSUPPORTED_TASK_ROUTE
+        selection["reason"] = f"{route} requires an uploaded image"
+    selection["route"] = route
+    if route in SUPPORTED_SUB_AGENTS:
+        selection["sub_agent"] = route
     selection["_usage"] = {
         "prompt_tokens": model_result["prompt_tokens"],
         "completion_tokens": model_result["completion_tokens"],
@@ -471,9 +515,32 @@ def multi_agent_chat():
     try:
         is_blocking = True
 
+        request_route = select_request_route(user_text, image_file is not None and bool(image_file.filename), forced_sub_agent)
+        route = request_route["route"]
+        if route in {DIRECT_CHAT_ROUTE, UNSUPPORTED_TASK_ROUTE}:
+            final_message, final_usage = make_direct_chat_answer(user_text, request_route.get("reason", ""))
+            response_payload = {
+                "object": "multi_agent.chat",
+                "message": final_message,
+            }
+            if debug_response:
+                prompt_tokens = request_route["_usage"]["prompt_tokens"] + final_usage.get("prompt_tokens", 0)
+                completion_tokens = request_route["_usage"]["completion_tokens"] + final_usage.get("completion_tokens", 0)
+                response_payload.update({
+                    "main_agent_selection": {
+                        "route": route,
+                        "reason": request_route.get("reason", ""),
+                    },
+                    "usage": {
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": prompt_tokens + completion_tokens,
+                    },
+                })
+            return Response(json.dumps(response_payload, ensure_ascii=False), content_type="application/json")
+
         cluster_resources = json.loads(call_mcp_tool("get_cluster_resources"))
-        sub_agent_selection = select_sub_agent(user_text, image_file is not None and bool(image_file.filename), forced_sub_agent)
-        sub_agent_name = sub_agent_selection["sub_agent"]
+        sub_agent_name = request_route["sub_agent"]
         selection, sub_agent_response, start_result, sub_agent_url, startup_failures = invoke_sub_agent_with_failover(
             user_text,
             cluster_resources,
@@ -482,7 +549,7 @@ def multi_agent_chat():
         )
         final_message, final_usage = make_final_answer(user_text, sub_agent_name, sub_agent_response)
 
-        sub_agent_select_usage = sub_agent_selection["_usage"]
+        sub_agent_select_usage = request_route["_usage"]
         main_usage = selection["_usage"]
         sub_usage = sub_agent_response.get("usage", {})
         prompt_tokens = (
@@ -510,7 +577,7 @@ def multi_agent_chat():
             response_payload.update({
                 "main_agent_selection": {
                     "sub_agent": selection["sub_agent"],
-                    "sub_agent_reason": sub_agent_selection.get("reason", ""),
+                    "sub_agent_reason": request_route.get("reason", ""),
                     "target_global_id": selection["target_global_id"],
                     "reason": selection.get("reason", ""),
                     "target_node": selection["target_node"],
