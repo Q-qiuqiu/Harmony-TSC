@@ -484,7 +484,7 @@ if __name__ == "__main__":
     print("==============================")
     sys.stdout.flush()
 
-    app.run(host='0.0.0.0', port=7081, threaded=True, debug=False)
+    app.run(host='0.0.0.0', port=8081, threaded=True, debug=False)
 
     print("====================")
     print("RKLLM model inference completed, releasing RKLLM model resources...")

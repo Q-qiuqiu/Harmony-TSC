@@ -325,7 +325,7 @@ def run_image_agent(user_text, image_path, max_steps=6):
     raise RuntimeError("image agent exceeded max tool-calling steps without producing a final answer")
 
 
-@app.route("/v1/chat/cluster", methods=["POST"])
+@app.route("/v1/agent/chat", methods=["POST"])
 def chat_cluster():
     global is_blocking
 
