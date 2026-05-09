@@ -99,47 +99,43 @@ def build_execution_selection_messages(user_text, image_name, execution_candidat
 
 
 def choose_execution_target(user_text, image_name, execution_candidates, sub_agent_profile):
-    if len(execution_candidates) == 1:
-        candidate = execution_candidates[0]
-        return {
-            "task_type": candidate.get("task_type"),
-            "target_global_id": candidate.get("target_global_id"),
-            "real_url": "segmentation",
-            "reason": "Only one deeplabv3 execution candidate is available.",
-            "candidate": candidate,
-        }, {
+    try:
+        model_result = call_llm(
+            build_execution_selection_messages(user_text, image_name, execution_candidates, sub_agent_profile),
+            llm_api_url=LLM_API_URL,
+            model_name=LLM_MODEL_NAME,
+        )
+        raw_content = model_result["content"].strip()
+    except Exception as exc:
+        model_result = {
+            "content": "",
             "prompt_tokens": 0,
             "completion_tokens": 0,
         }
-
-    model_result = call_llm(
-        build_execution_selection_messages(user_text, image_name, execution_candidates, sub_agent_profile),
-        llm_api_url=LLM_API_URL,
-        model_name=LLM_MODEL_NAME,
-    )
-    raw_content = model_result["content"].strip()
+        raw_content = ""
+        print(f"segmentation agent model selection failed: {exc}", flush=True)
     print(f"segmentation agent raw model selection: {raw_content}", flush=True)
     try:
         selection = parse_json_object(raw_content)
-    except json.JSONDecodeError:
+    except Exception:
         selection = {}
     task_type = selection.get("task_type")
     target_global_id = selection.get("target_global_id")
 
-    candidate = None
-    for item in execution_candidates:
-        if item.get("task_type") == task_type and item.get("target_global_id") == target_global_id:
-            candidate = item
-            break
+    candidate = find_matching_candidate(execution_candidates, task_type, target_global_id)
     if candidate is None:
-        for item in execution_candidates:
-            if item.get("task_type") == SEGMENTATION_TASK_TYPE:
-                candidate = item
-                task_type = item.get("task_type")
-                target_global_id = item.get("target_global_id")
-                break
+        candidate = choose_fallback_candidate(execution_candidates)
     if candidate is None:
         raise RuntimeError("segmentation agent could not find a supported deeplabv3 execution candidate")
+    if task_type != candidate.get("task_type") or target_global_id != candidate.get("target_global_id"):
+        task_type = candidate.get("task_type")
+        target_global_id = candidate.get("target_global_id")
+        selection = {
+            "task_type": task_type,
+            "target_global_id": target_global_id,
+            "reason": "model selection did not return a valid execution pair; used deterministic fallback",
+        }
+        print(f"segmentation agent fallback selection: {json.dumps(selection, ensure_ascii=False)}", flush=True)
 
     return {
         "task_type": task_type,
@@ -148,6 +144,35 @@ def choose_execution_target(user_text, image_name, execution_candidates, sub_age
         "reason": selection.get("reason", ""),
         "candidate": candidate,
     }, model_result
+
+
+def find_matching_candidate(execution_candidates, task_type, target_global_id):
+    if not task_type or not target_global_id:
+        return None
+    for item in execution_candidates:
+        if item.get("task_type") == task_type and item.get("target_global_id") == target_global_id:
+            return item
+    return None
+
+
+def choose_fallback_candidate(execution_candidates):
+    candidates = [
+        item for item in execution_candidates
+        if isinstance(item, dict) and item.get("task_type") == SEGMENTATION_TASK_TYPE
+    ]
+    if not candidates:
+        return None
+
+    def score(item):
+        overhead = item.get("overhead") or {}
+        resource = item.get("resource") or {}
+        return (
+            float(overhead.get("proc_time", 1e9)),
+            float(resource.get("mem_used", 1.0)),
+            float(resource.get("cpu_used", 1.0)),
+        )
+
+    return min(candidates, key=score)
 
 
 def redact_large_binary_fields(value):
@@ -188,15 +213,23 @@ def build_summary_messages(user_text, selected_execution, tool_result):
 
 
 def summarize_result(user_text, selected_execution, tool_result):
-    model_result = call_llm(
-        build_summary_messages(user_text, selected_execution, tool_result),
-        llm_api_url=LLM_API_URL,
-        model_name=LLM_MODEL_NAME,
-    )
-    content = model_result["content"].strip()
+    try:
+        model_result = call_llm(
+            build_summary_messages(user_text, selected_execution, tool_result),
+            llm_api_url=LLM_API_URL,
+            model_name=LLM_MODEL_NAME,
+        )
+        content = model_result["content"].strip()
+    except Exception as exc:
+        model_result = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        }
+        content = ""
+        print(f"segmentation agent model summary failed: {exc}", flush=True)
     print(f"segmentation agent raw model summary: {content}", flush=True)
     if not content:
-        raise RuntimeError("segmentation agent returned empty summary")
+        content = "语义分割已完成，分割结果图片已返回。"
     return content, model_result
 
 

@@ -1,5 +1,6 @@
 import argparse
 import json
+import re
 import threading
 from flask import Flask, Response, jsonify, request
 
@@ -184,6 +185,49 @@ def parse_bool_form_value(value):
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def route_by_rules(user_text, has_image):
+    normalized_text = user_text.lower()
+    text_classification = bool(
+        re.search(r"文本分类|句子分类|这句话.*分类|这段话.*分类|对.*句话.*分类|classify|classification", normalized_text)
+    )
+    image_segmentation = bool(re.search(r"语义分割|图片分割|图像分割|分割|segmentation|segment", normalized_text))
+    image_task = bool(
+        re.search(r"图片|图像|照片|image|photo|识别|检测|分类|目标|物体|classify|classification|detect|detection", normalized_text)
+    )
+
+    if text_classification and not has_image:
+        return {
+            "route": "text_agent",
+            "sub_agent": "text_agent",
+            "reason": "matched explicit text classification request",
+            "_usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            },
+        }
+    if image_segmentation:
+        return {
+            "route": "segmentation_agent" if has_image else UNSUPPORTED_TASK_ROUTE,
+            "sub_agent": "segmentation_agent" if has_image else None,
+            "reason": "matched image segmentation request" if has_image else "image segmentation requires an uploaded image",
+            "_usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            },
+        }
+    if has_image and image_task:
+        return {
+            "route": "image_agent",
+            "sub_agent": "image_agent",
+            "reason": "matched image processing request",
+            "_usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            },
+        }
+    return None
+
+
 def select_request_route(user_text, has_image, forced_sub_agent=None):
     if forced_sub_agent:
         if forced_sub_agent not in SUPPORTED_SUB_AGENTS:
@@ -197,6 +241,10 @@ def select_request_route(user_text, has_image, forced_sub_agent=None):
                 "completion_tokens": 0,
             },
         }
+
+    rule_route = route_by_rules(user_text, has_image)
+    if rule_route is not None:
+        return rule_route
 
     sub_agent_catalog = load_sub_agent_catalog()
     model_result = call_llm(
