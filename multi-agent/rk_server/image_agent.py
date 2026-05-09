@@ -266,12 +266,13 @@ def choose_fallback_candidate(user_text, execution_candidates):
 def build_deterministic_summary(selected_execution, tool_result):
     task_type = selected_execution.get("task_type")
     results = tool_result.get("results") if isinstance(tool_result, dict) else None
+    result = tool_result.get("result") if isinstance(tool_result, dict) else None
+    exec_time = tool_result.get("exec_time") if isinstance(tool_result, dict) else None
     if task_type in {"MobileNet", "ResNet50"} and isinstance(results, list) and results:
         top_result = results[0]
         if isinstance(top_result, dict):
             class_name = top_result.get("class")
             confidence = top_result.get("confidence")
-            exec_time = tool_result.get("exec_time")
             if class_name:
                 parts = [f"图像分类结果：最可能是 {class_name}"]
                 if isinstance(confidence, (int, float)):
@@ -281,8 +282,20 @@ def build_deterministic_summary(selected_execution, tool_result):
                 parts.append(f"使用模型：{task_type}")
                 return "，".join(parts) + "。"
 
+    if task_type in {"MobileNet", "ResNet50"} and isinstance(result, dict):
+        index = result.get("index")
+        score = result.get("score")
+        parts = ["图像分类完成"]
+        if index is not None:
+            parts.append(f"分类索引为 {index}")
+        if isinstance(score, (int, float)):
+            parts.append(f"置信度 {score * 100:.2f}%")
+        if isinstance(exec_time, (int, float)):
+            parts.append(f"模型耗时 {exec_time:.2f} ms")
+        parts.append(f"使用模型：{task_type}")
+        return "，".join(parts) + "。"
+
     if task_type == "YoloV5" and isinstance(results, list):
-        exec_time = tool_result.get("exec_time") if isinstance(tool_result, dict) else None
         parts = [f"目标检测完成，共检测到 {len(results)} 个结果"]
         if isinstance(exec_time, (int, float)):
             parts.append(f"模型耗时 {exec_time:.2f} ms")
@@ -307,7 +320,8 @@ def summarize_result(user_text, selected_execution, tool_result):
     )
     content = model_result["content"].strip()
     if not content:
-        raise RuntimeError("sub image agent returned empty summary")
+        fallback_summary = f"图像任务已完成，使用模型：{selected_execution.get('task_type', 'unknown')}。"
+        return fallback_summary, model_result
     return content, model_result
 
 
