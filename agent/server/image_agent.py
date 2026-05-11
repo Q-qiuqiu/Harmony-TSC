@@ -2,6 +2,7 @@ import argparse
 import json
 import mimetypes
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -140,10 +141,10 @@ def call_mcp_tool(server_path, tool_name, arguments=None, timeout=30):
     raise RuntimeError("MCP tool did not return a tools/call response")
 
 
-def execute_tool(tool_name, arguments=None):
+def execute_tool(tool_name, arguments=None, timeout=30):
     if not os.path.exists(DEFAULT_MCP_SERVER_PATH):
         raise RuntimeError(f"MCP server not found: {DEFAULT_MCP_SERVER_PATH}")
-    return call_mcp_tool(DEFAULT_MCP_SERVER_PATH, tool_name, arguments=arguments or {})
+    return call_mcp_tool(DEFAULT_MCP_SERVER_PATH, tool_name, arguments=arguments or {}, timeout=timeout)
 
 
 def discover_tools():
@@ -219,110 +220,332 @@ def save_uploaded_image(uploaded_file):
     return temp_file.name
 
 
-def build_agent_messages(user_text, image_path, tools):
-    tool_list_json = json.dumps(tools, ensure_ascii=False)
+def build_model_selection_messages(user_text, image_name, execution_candidates):
     return [
         {
             "role": "system",
             "content": (
-                "You are an image task orchestration agent.\n"
-                "You must decide which tools to call, in what order, and with what arguments.\n"
-                "The uploaded image is already saved locally and tools can use the local image path.\n"
-                "Use tools to inspect cluster resources, available task catalog, and execute the image task.\n"
-                "Before calling the execution tool, you must first call get_cluster_resources.\n"
-                "If model choice matters, call get_task_catalog before the execution tool.\n"
-                "When calling get_task_catalog, pass available_device_types derived from the node types returned by get_cluster_resources so the context only contains models that match currently available platforms.\n"
-                "For execution, prefer lower resource overhead models when they can satisfy the request.\n"
-                "For generic multi-object detection requests, YoloV5 is often suitable; for lightweight classification-style requests, MobileNet or ResNet50 may be more appropriate.\n"
-                "Available tools:\n"
-                f"{tool_list_json}\n"
+                "You are an image execution selector.\n"
+                "The program has already collected cluster resources and execution candidates.\n"
+                "Choose exactly one valid task_type and target_global_id from the provided execution candidates.\n"
+                "Return JSON only with this schema:\n"
+                "{\"task_type\":\"YoloV5\",\"target_global_id\":\"<uuid>\",\"reason\":\"<short reason>\"}\n"
                 "Rules:\n"
-                "1. If you want to call a tool, reply with JSON only:\n"
-                "{\"action\":\"tool_call\",\"tool_name\":\"<tool name>\",\"arguments\":{}}\n"
-                "2. Tool arguments must match the tool schema.\n"
-                "3. Never call run_vision_task_on_node until you already know a real target_global_id from tool output.\n"
-                "4. target_global_id must come from get_cluster_resources result and must never be a placeholder such as default, unknown, null, or empty string.\n"
-                "5. When calling run_vision_task_on_node, include the provided image_path exactly as given.\n"
-                "6. After receiving tool results, continue reasoning and either call another tool or produce the final answer.\n"
-                "7. If required information is missing, call another tool instead of guessing.\n"
-                "8. Do not invent node ids, task types, device types, or tool results.\n"
-                "9. When you have enough information, reply with JSON only:\n"
-                "{\"action\":\"final\",\"content\":\"<natural language chinese answer>\"}\n"
-                "10. Never output anything except a single JSON object."
+                "1. task_type and target_global_id must be chosen from the provided execution candidates.\n"
+                "2. YoloV5 is for object detection and bounding boxes, not image classification.\n"
+                "3. MobileNet and ResNet50 are for image classification.\n"
+                "4. For classification requests, prefer MobileNet when speed is important; use ResNet50 when accuracy is preferred.\n"
+                "5. Prefer lower expected overhead when it still satisfies the task intent.\n"
+                "6. Never call tools. Never output anything except a single JSON object."
             ),
         },
         {
             "role": "user",
             "content": (
                 f"user_text:\n{user_text}\n\n"
-                f"image_path:\n{image_path}"
+                f"image_name:\n{image_name}\n\n"
+                f"execution_candidates:\n{json.dumps(execution_candidates, ensure_ascii=False)}"
             ),
         },
     ]
 
 
-def run_image_agent(user_text, image_path, max_steps=6):
-    working_messages = build_agent_messages(user_text, image_path, discover_tools())
+def build_result_summary_messages(user_text, selected_execution, tool_result):
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are an image agent.\n"
+                "Summarize the actual vision execution result in concise Chinese for the end user.\n"
+                "Base the answer only on the provided execution result.\n"
+                "If the result is empty or unclear, say so explicitly.\n"
+                "Return plain Chinese text only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"user_text:\n{user_text}\n\n"
+                f"selected_execution:\n{json.dumps(selected_execution, ensure_ascii=False)}\n\n"
+                f"tool_result:\n{json.dumps(tool_result, ensure_ascii=False)}"
+            ),
+        },
+    ]
+
+
+def build_execution_candidates(cluster_resources, task_catalog):
+    supported_task_types = {"YoloV5", "MobileNet", "ResNet50"}
+    nodes = [
+        node for node in cluster_resources.get("result", [])
+        if isinstance(node, dict)
+    ]
+    candidates = []
+    for node in nodes:
+        node_type = node.get("type")
+        models = []
+        for item in task_catalog.get("result", []):
+            if not isinstance(item, dict):
+                continue
+            task_type = item.get("task_type")
+            if item.get("device_type") != node_type or task_type not in supported_task_types:
+                continue
+            models.append(
+                {
+                    "task_type": task_type,
+                    "model_name": item.get("model_name"),
+                    "overhead": item.get("overhead"),
+                }
+            )
+        if models:
+            candidates.append(
+                {
+                    "target_global_id": node.get("global_id"),
+                    "ip_address": node.get("ip_address"),
+                    "device_type": node_type,
+                    "resource": node.get("resource"),
+                    "models": models,
+                }
+            )
+    if not candidates:
+        raise RuntimeError("no image execution candidates available on the current cluster")
+    return {"status": "success", "result": candidates}
+
+
+def find_matching_candidate(execution_candidates, task_type, target_global_id):
+    if not task_type or not target_global_id:
+        return None
+    for node_item in execution_candidates.get("result", []):
+        if not isinstance(node_item, dict) or node_item.get("target_global_id") != target_global_id:
+            continue
+        for model_item in node_item.get("models", []):
+            if isinstance(model_item, dict) and model_item.get("task_type") == task_type:
+                return {
+                    "target_global_id": node_item.get("target_global_id"),
+                    "ip_address": node_item.get("ip_address"),
+                    "device_type": node_item.get("device_type"),
+                    "resource": node_item.get("resource"),
+                    "task_type": model_item.get("task_type"),
+                    "model_name": model_item.get("model_name"),
+                    "overhead": model_item.get("overhead"),
+                }
+    return None
+
+
+def flatten_execution_candidates(execution_candidates):
+    flattened = []
+    for node_item in execution_candidates.get("result", []):
+        if not isinstance(node_item, dict):
+            continue
+        for model_item in node_item.get("models", []):
+            if not isinstance(model_item, dict):
+                continue
+            flattened.append(
+                {
+                    "target_global_id": node_item.get("target_global_id"),
+                    "ip_address": node_item.get("ip_address"),
+                    "device_type": node_item.get("device_type"),
+                    "resource": node_item.get("resource"),
+                    "task_type": model_item.get("task_type"),
+                    "model_name": model_item.get("model_name"),
+                    "overhead": model_item.get("overhead") or {},
+                }
+            )
+    return flattened
+
+
+def choose_fallback_candidate(user_text, execution_candidates):
+    candidates = flatten_execution_candidates(execution_candidates)
+    if not candidates:
+        raise RuntimeError("no image execution candidates available for fallback selection")
+
+    normalized_text = user_text.lower()
+    wants_detection = bool(re.search(r"检测|目标|物体|框|detect|detection|object", normalized_text))
+    wants_speed = bool(re.search(r"快|速度|fast|faster|speed", normalized_text))
+    wants_classification = bool(re.search(r"分类|种类|类别|class|classification", normalized_text))
+
+    def by_proc_time(item):
+        overhead = item.get("overhead") or {}
+        return float(overhead.get("proc_time", 1e9))
+
+    if wants_detection:
+        detection_candidates = [item for item in candidates if item.get("task_type") == "YoloV5"]
+        if detection_candidates:
+            return min(detection_candidates, key=by_proc_time)
+
+    if wants_speed or wants_classification:
+        classification_candidates = [
+            item for item in candidates
+            if item.get("task_type") in {"MobileNet", "ResNet50"}
+        ]
+        if classification_candidates:
+            return min(classification_candidates, key=by_proc_time)
+
+    return min(
+        candidates,
+        key=lambda item: (
+            float((item.get("resource") or {}).get("mem_used", 0.0)),
+            by_proc_time(item),
+        )
+    )
+
+
+def choose_execution_target(user_text, image_name, execution_candidates):
+    try:
+        model_result = call_llm(build_model_selection_messages(user_text, image_name, execution_candidates))
+        raw_content = model_result["content"].strip()
+    except Exception as exc:
+        model_result = {
+            "content": "",
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        }
+        raw_content = ""
+        print(f"image agent model selection failed: {exc}", flush=True)
+
+    print(f"image agent raw model selection: {raw_content}", flush=True)
+    try:
+        selection = parse_json_object(raw_content)
+    except Exception:
+        selection = {}
+
+    task_type = selection.get("task_type")
+    target_global_id = selection.get("target_global_id")
+    matched_candidate = find_matching_candidate(execution_candidates, task_type, target_global_id)
+    if matched_candidate is None:
+        matched_candidate = choose_fallback_candidate(user_text, execution_candidates)
+        selection = {
+            "task_type": matched_candidate["task_type"],
+            "target_global_id": matched_candidate["target_global_id"],
+            "reason": "model selection did not return a valid execution pair; used deterministic fallback",
+        }
+        print(f"image agent fallback selection: {json.dumps(selection, ensure_ascii=False)}", flush=True)
+
+    selection["candidate"] = matched_candidate
+    return selection, model_result
+
+
+def build_deterministic_summary(selected_execution, tool_result):
+    task_type = selected_execution.get("task_type")
+    results = tool_result.get("results") if isinstance(tool_result, dict) else None
+    result = tool_result.get("result") if isinstance(tool_result, dict) else None
+    exec_time = tool_result.get("exec_time") if isinstance(tool_result, dict) else None
+    if exec_time is None and isinstance(tool_result, dict):
+        exec_time = tool_result.get("gateway_time")
+
+    if task_type in {"MobileNet", "ResNet50"} and isinstance(results, list) and results:
+        top_result = results[0]
+        if isinstance(top_result, dict):
+            class_name = top_result.get("class")
+            confidence = top_result.get("confidence")
+            if class_name:
+                parts = [f"图像分类结果：最可能是 {class_name}"]
+                if isinstance(confidence, (int, float)):
+                    parts.append(f"置信度 {confidence * 100:.2f}%")
+                if isinstance(exec_time, (int, float)):
+                    parts.append(f"耗时 {exec_time:.2f} ms")
+                parts.append(f"使用模型：{task_type}")
+                return "，".join(parts) + "。"
+
+    if task_type in {"MobileNet", "ResNet50"} and isinstance(result, dict):
+        index = result.get("index")
+        score = result.get("score")
+        parts = ["图像分类完成"]
+        if index is not None:
+            parts.append(f"分类索引为 {index}")
+        if isinstance(score, (int, float)):
+            parts.append(f"置信度 {score * 100:.2f}%")
+        if isinstance(exec_time, (int, float)):
+            parts.append(f"耗时 {exec_time:.2f} ms")
+        parts.append(f"使用模型：{task_type}")
+        return "，".join(parts) + "。"
+
+    if task_type == "YoloV5" and isinstance(results, list):
+        parts = [f"目标检测完成，共检测到 {len(results)} 个结果"]
+        if isinstance(exec_time, (int, float)):
+            parts.append(f"耗时 {exec_time:.2f} ms")
+        parts.append("使用模型：YoloV5")
+        return "，".join(parts) + "。"
+
+    return None
+
+
+def summarize_result(user_text, selected_execution, tool_result):
+    deterministic_summary = build_deterministic_summary(selected_execution, tool_result)
+    if deterministic_summary:
+        return deterministic_summary, {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+        }
+
+    model_result = call_llm(build_result_summary_messages(user_text, selected_execution, tool_result))
+    content = model_result["content"].strip()
+    if not content:
+        return f"图像任务已完成，使用模型：{selected_execution.get('task_type', 'unknown')}。", model_result
+    return content, model_result
+
+
+def run_image_agent(user_text, image_path):
     total_prompt_tokens = 0
     total_completion_tokens = 0
-    selected_execution = None
-    last_tool_result = None
 
-    for _ in range(max_steps):
-        model_result = call_llm(working_messages)
-        total_prompt_tokens += model_result["prompt_tokens"]
-        total_completion_tokens += model_result["completion_tokens"]
+    cluster_resources = json.loads(execute_tool("get_cluster_resources", timeout=30))
+    available_device_types = sorted(
+        {
+            node.get("type")
+            for node in cluster_resources.get("result", [])
+            if isinstance(node, dict) and node.get("type")
+        }
+    )
+    task_catalog = json.loads(
+        execute_tool(
+            "get_task_catalog",
+            {"available_device_types": available_device_types},
+            timeout=30,
+        )
+    )
+    execution_candidates = build_execution_candidates(cluster_resources, task_catalog)
 
-        try:
-            agent_action = parse_json_object(model_result["content"])
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"model did not return valid JSON for agent control: {exc}")
+    image_name = os.path.basename(image_path)
+    selection, selection_usage = choose_execution_target(user_text, image_name, execution_candidates)
+    total_prompt_tokens += selection_usage["prompt_tokens"]
+    total_completion_tokens += selection_usage["completion_tokens"]
 
-        action = agent_action.get("action")
-        if action == "final":
-            content = agent_action.get("content", "").strip()
-            if not content:
-                raise RuntimeError("model returned empty final content")
-            return {
-                "message": content,
-                "selected_node": selected_execution,
-                "tool_result": last_tool_result,
-                "usage": {
-                    "prompt_tokens": total_prompt_tokens,
-                    "completion_tokens": total_completion_tokens,
-                    "total_tokens": total_prompt_tokens + total_completion_tokens,
-                },
-            }
+    selected_execution = {
+        "task_type": selection["task_type"],
+        "target_global_id": selection["target_global_id"],
+        "real_url": "predict",
+        "reason": selection.get("reason", ""),
+        "candidate": selection["candidate"],
+    }
 
-        if action != "tool_call":
-            raise RuntimeError(f"unknown agent action: {action}")
+    tool_result = json.loads(
+        execute_tool(
+            "run_vision_task_on_node",
+            {
+                "task_type": selection["task_type"],
+                "target_global_id": selection["target_global_id"],
+                "image_path": image_path,
+                "real_url": "predict",
+                "file_field_name": "image",
+            },
+            timeout=150,
+        )
+    )
 
-        tool_name = agent_action.get("tool_name")
-        tool_arguments = agent_action.get("arguments", {})
-        if not tool_name:
-            raise RuntimeError("model tool_call is missing tool_name")
+    message, summary_usage = summarize_result(user_text, selected_execution, tool_result)
+    total_prompt_tokens += summary_usage["prompt_tokens"]
+    total_completion_tokens += summary_usage["completion_tokens"]
 
-        tool_result_text = execute_tool(tool_name, tool_arguments)
-        try:
-            tool_result_value = json.loads(tool_result_text)
-        except json.JSONDecodeError:
-            tool_result_value = tool_result_text
-
-        if tool_name == "run_vision_task_on_node":
-            selected_execution = {
-                "task_type": tool_arguments.get("task_type"),
-                "target_global_id": tool_arguments.get("target_global_id"),
-                "real_url": tool_arguments.get("real_url", "predict"),
-            }
-            last_tool_result = tool_result_value
-
-        working_messages.append({"role": "assistant", "content": model_result["content"]})
-        working_messages.append({
-            "role": "tool",
-            "content": f"tool_name={tool_name}\nresult={json.dumps(tool_result_value, ensure_ascii=False)}"
-        })
-
-    raise RuntimeError("image agent exceeded max tool-calling steps without producing a final answer")
+    return {
+        "message": message,
+        "selected_node": selected_execution,
+        "tool_result": tool_result,
+        "usage": {
+            "prompt_tokens": total_prompt_tokens,
+            "completion_tokens": total_completion_tokens,
+            "total_tokens": total_prompt_tokens + total_completion_tokens,
+        },
+    }
 
 
 @app.route("/v1/agent/chat", methods=["POST"])
